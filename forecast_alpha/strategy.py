@@ -514,6 +514,7 @@ def run_hard_floor_strategy(
                 "margin_F":         rm_F - ub,
                 "no_ask":           c.no_ask,
                 "structural_arb":   True,
+                "confidence":       1.0,                  # certain outcome → hold to settlement
                 "expected_net_cents": float(net_cents),
                 "exposure_frac":    float(n * c.no_ask / max(bankroll_usd, 1e-9)),
             },

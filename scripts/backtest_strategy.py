@@ -30,9 +30,107 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from dataclasses import dataclass
+
 from forecast_alpha.calibration import (
     CalibrationDay, build_override_lookup, leave_one_out_calibrate,
 )
+
+
+@dataclass(frozen=True)
+class ExitRule:
+    """Intraday exit rules. None = no rule (don't trigger). All-None = hold to settlement."""
+    profit_take_cents: float | None = None     # sell when (exit_price - entry_price) >= X¢
+    stop_loss_cents:   float | None = None     # cut when (entry_price - exit_price) >= X¢
+    timeout_hour_local: float | None = None    # exit at hour H local (e.g., 20.0 = 8 PM)
+    confidence_hold_floor: float | None = None # IF rationale.confidence > floor → hold regardless
+
+    def is_active(self) -> bool:
+        return any(x is not None for x in (
+            self.profit_take_cents, self.stop_loss_cents, self.timeout_hour_local,
+        ))
+
+
+def _exit_side_price(trade_row, side: str) -> float:
+    """Estimated bid (selling) price for our side, given the latest trade. We sell into the
+    bid, which is ~1¢ below mid on Kalshi for typical contracts. last_trade_price ≈ mid."""
+    if side == "yes":
+        return max((trade_row["yes_price_cents"] - 1) / 100.0, 0.01)
+    return max((trade_row["no_price_cents"] - 1) / 100.0, 0.01)
+
+
+def simulate_position(
+    *,
+    side: str,
+    bucket_spec: str,
+    n: int,
+    entry_price_dollars: float,
+    entry_fee_cents: int,
+    entry_t_utc: pd.Timestamp,
+    trades_for_ticker: pd.DataFrame,
+    actual_f: int,
+    confidence: float,
+    exit_rule: ExitRule,
+    local_tz: str,
+) -> tuple[int, dict]:
+    """Walk post-entry trades, apply exit rule, return (net_pnl_cents, exit_info).
+
+    If exit rule is None / inactive, OR confidence > confidence_hold_floor → settle naturally.
+    Otherwise scan trades in chronological order and trigger the first matching exit.
+    Exit fee uses trade_fee_cents at the exit price for the same N contracts.
+    """
+    entry_cost_cents = int(round(entry_price_dollars * 100)) * n
+
+    def _settle() -> int:
+        won = settle_position(bucket_spec, actual_f, side)
+        payout = n * 100 if won else 0
+        return payout - entry_cost_cents - entry_fee_cents
+
+    # Force-hold path: high-confidence positions go to settlement
+    if (exit_rule.confidence_hold_floor is not None
+            and confidence > exit_rule.confidence_hold_floor):
+        return _settle(), {"exit_type": "hold_settlement_confidence",
+                           "confidence": confidence}
+
+    if not exit_rule.is_active():
+        return _settle(), {"exit_type": "no_exit_rule"}
+
+    # Compute timeout deadline in UTC
+    timeout_utc: pd.Timestamp | None = None
+    if exit_rule.timeout_hour_local is not None:
+        date_local = pd.Timestamp(entry_t_utc).tz_convert(local_tz).normalize()
+        timeout_utc = (date_local + pd.Timedelta(hours=float(exit_rule.timeout_hour_local))).tz_convert("UTC")
+
+    post = trades_for_ticker[trades_for_ticker["timestamp"] > entry_t_utc].sort_values("timestamp")
+
+    for _, row in post.iterrows():
+        ts = row["timestamp"]
+        exit_price = _exit_side_price(row, side)
+        diff_cents = (exit_price - entry_price_dollars) * 100
+
+        if exit_rule.profit_take_cents is not None and diff_cents >= exit_rule.profit_take_cents:
+            exit_fee = trade_fee_cents(exit_price, n)
+            exit_proceeds = int(round(exit_price * 100)) * n
+            return (exit_proceeds - entry_cost_cents - entry_fee_cents - exit_fee,
+                    {"exit_type": "profit_take", "exit_price": exit_price,
+                     "exit_t": ts, "exit_fee_cents": exit_fee})
+
+        if exit_rule.stop_loss_cents is not None and -diff_cents >= exit_rule.stop_loss_cents:
+            exit_fee = trade_fee_cents(exit_price, n)
+            exit_proceeds = int(round(exit_price * 100)) * n
+            return (exit_proceeds - entry_cost_cents - entry_fee_cents - exit_fee,
+                    {"exit_type": "stop_loss", "exit_price": exit_price,
+                     "exit_t": ts, "exit_fee_cents": exit_fee})
+
+        if timeout_utc is not None and ts >= timeout_utc:
+            exit_fee = trade_fee_cents(exit_price, n)
+            exit_proceeds = int(round(exit_price * 100)) * n
+            return (exit_proceeds - entry_cost_cents - entry_fee_cents - exit_fee,
+                    {"exit_type": "timeout", "exit_price": exit_price,
+                     "exit_t": ts, "exit_fee_cents": exit_fee})
+
+    # No exit triggered; default to settlement.
+    return _settle(), {"exit_type": "no_trigger_settled"}
 from forecast_alpha.config import load_config
 from forecast_alpha.fees import trade_fee_cents
 from forecast_alpha.kalshi import KalshiContract
@@ -208,10 +306,15 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
              base_rate: float = 0.739,
              smooth_sigma: float = 0.0,
              force_adjacency: bool = False,
-             override_lookup: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+             override_lookup: dict | None = None,
+             exit_rule: ExitRule | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     art = load_artifacts(cfg.paths.model_dir)
     cli_truth = {pd.Timestamp(d).normalize(): int(v)
                  for d, v in cli[["date", "max_temp_f"]].dropna().itertuples(index=False, name=None)}
+
+    exit_rule = exit_rule or ExitRule()
+    # Pre-group trades by ticker once for fast post-anchor lookup
+    trades_by_ticker = {t: g.sort_values("timestamp") for t, g in kalshi.groupby("ticker")}
 
     bankroll = starting_bankroll or cfg.strategy.bankroll_usd
     cum_pnl_cents = 0
@@ -297,13 +400,26 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
             price = c.yes_ask if tgt.side == "yes" else c.no_ask
             n = tgt.target_contracts
             cost_cents = int(round(price * 100)) * n
-            fee_cents = trade_fee_cents(price, n)
-            won = settle_position(tgt.bucket_spec, actual_f, tgt.side)
-            payout_cents = n * 100 if won else 0
-            net = payout_cents - cost_cents - fee_cents
+            entry_fee = trade_fee_cents(price, n)
+
+            confidence = float(tgt.rationale.get("confidence",
+                              tgt.rationale.get("p_model", pred.peak_P)))
+            ticker_trades = trades_by_ticker.get(tgt.ticker, kalshi.iloc[0:0])
+
+            net, exit_info = simulate_position(
+                side=tgt.side, bucket_spec=tgt.bucket_spec, n=n,
+                entry_price_dollars=price, entry_fee_cents=entry_fee,
+                entry_t_utc=anchor_t_utc, trades_for_ticker=ticker_trades,
+                actual_f=actual_f, confidence=confidence,
+                exit_rule=exit_rule, local_tz=cfg.local_tz,
+            )
+
+            total_fee = entry_fee + int(exit_info.get("exit_fee_cents", 0))
             day_pnl_cents += net
-            day_fees_cents += fee_cents
+            day_fees_cents += total_fee
             day_stake_cents += cost_cents
+
+            won_settled = settle_position(tgt.bucket_spec, actual_f, tgt.side)
             positions.append({
                 "date":          date,
                 "actual_f":      actual_f,
@@ -313,11 +429,14 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
                 "contracts":     n,
                 "entry_cents":   int(round(price * 100)),
                 "stake_cents":   cost_cents,
-                "fee_cents":     fee_cents,
-                "won":           won,
+                "fee_cents":     total_fee,
+                "won":           won_settled,
                 "net_cents":     net,
+                "exit_type":     exit_info.get("exit_type", ""),
+                "exit_price":    exit_info.get("exit_price", None),
                 "p_model":       float(tgt.rationale.get("p_model", 0)),
                 "p_market":      float(tgt.rationale.get("p_market", 0)),
+                "confidence":    confidence,
                 "kelly_f":       float(tgt.rationale.get("kelly_f", 0)),
                 "net_ev_cents":  float(tgt.rationale.get("net_ev_cents", 0)),
                 "bankroll_pre":  bankroll,
@@ -441,6 +560,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="Tier 1.2: pick 2nd modal from buckets adjacent to modal, not raw PMF rank.")
     ap.add_argument("--calibrate-to-market", action="store_true",
                     help="Tier 1.1: LOO-fit shrinkage between model and market-implied bucket probs.")
+    ap.add_argument("--profit-take-cents", type=float, default=None,
+                    help="Intraday exit: sell when (exit - entry) >= X cents.")
+    ap.add_argument("--stop-loss-cents", type=float, default=None,
+                    help="Intraday exit: cut when (entry - exit) >= X cents.")
+    ap.add_argument("--timeout-hour-local", type=float, default=None,
+                    help="Intraday exit: close all positions at hour H local (e.g., 20 = 8 PM).")
+    ap.add_argument("--hold-confidence-floor", type=float, default=None,
+                    help="Hold position to settlement only if rationale.confidence > X (else use intraday rules).")
     ap.add_argument("--out", default="data/backtest_results.parquet")
     args = ap.parse_args(argv)
 
@@ -461,6 +588,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  per-day alpha: mean={np.mean(alphas):.3f}, median={np.median(alphas):.3f}, "
               f"min={np.min(alphas):.3f}, max={np.max(alphas):.3f}")
 
+    exit_rule = ExitRule(
+        profit_take_cents=args.profit_take_cents,
+        stop_loss_cents=args.stop_loss_cents,
+        timeout_hour_local=args.timeout_hour_local,
+        confidence_hold_floor=args.hold_confidence_floor,
+    )
+
     df, positions = backtest(cfg, oof, kalshi, cli, args.start, args.end,
                               args.assumed_spread_cents,
                               strategy_name=args.strategy,
@@ -469,7 +603,8 @@ def main(argv: list[str] | None = None) -> int:
                               base_rate=args.base_rate,
                               smooth_sigma=args.smooth_sigma,
                               force_adjacency=args.force_adjacency,
-                              override_lookup=override_lookup)
+                              override_lookup=override_lookup,
+                              exit_rule=exit_rule)
     print(f"\nstrategy:  {args.strategy}  fire_mode={args.fire_mode}  "
           f"min_margin={args.min_margin}  base_rate={args.base_rate}  "
           f"smooth_sigma={args.smooth_sigma}  force_adjacency={args.force_adjacency}  "

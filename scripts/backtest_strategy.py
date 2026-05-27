@@ -309,7 +309,10 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
              force_adjacency: bool = False,
              override_lookup: dict | None = None,
              exit_rule: ExitRule | None = None,
-             wing_base_rate: float | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+             wing_base_rate: float | None = None,
+             wing_sizing_mode: str = "equal_payout",
+             wing_drop_worst_leg: bool = False,
+             wing_max_sum_3: float = 0.97) -> tuple[pd.DataFrame, pd.DataFrame]:
     art = load_artifacts(cfg.paths.model_dir)
     cli_truth = {pd.Timestamp(d).normalize(): int(v)
                  for d, v in cli[["date", "max_temp_f"]].dropna().itertuples(index=False, name=None)}
@@ -388,13 +391,15 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
         elif strategy_name == "wing":
             strat_out = run_wing_strategy(
                 cfg.strategy, pred, contracts, feature_row, bankroll,
-                base_rate=wing_base_rate,
+                base_rate=wing_base_rate, sizing_mode=wing_sizing_mode,
+                drop_worst_leg=wing_drop_worst_leg, max_sum_3=wing_max_sum_3,
             )
         elif strategy_name == "wing_any":
             strat_out = run_wing_strategy(
                 cfg.strategy, pred, contracts, feature_row, bankroll,
                 require_agreement=False,
-                base_rate=wing_base_rate,
+                base_rate=wing_base_rate, sizing_mode=wing_sizing_mode,
+                drop_worst_leg=wing_drop_worst_leg, max_sum_3=wing_max_sum_3,
             )
         else:
             strat_out = run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
@@ -584,6 +589,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="Hold position to settlement only if rationale.confidence > X (else use intraday rules).")
     ap.add_argument("--wing-base-rate", type=float, default=None,
                     help="(wing/wing_any) override model's p_top_wing with this fixed base rate (e.g., 0.95).")
+    ap.add_argument("--wing-sizing-mode", choices=["equal_payout", "prob_weighted"],
+                    default="equal_payout", help="(wing) how to size per leg.")
+    ap.add_argument("--wing-drop-worst-leg", action="store_true",
+                    help="(wing) drop the leg with worst p_model - yes_ask before sizing.")
+    ap.add_argument("--wing-max-sum-3", type=float, default=0.97,
+                    help="(wing) max sum_asks across wing legs before strategy fires.")
     ap.add_argument("--out", default="data/backtest_results.parquet")
     args = ap.parse_args(argv)
 
@@ -621,7 +632,10 @@ def main(argv: list[str] | None = None) -> int:
                               force_adjacency=args.force_adjacency,
                               override_lookup=override_lookup,
                               exit_rule=exit_rule,
-                              wing_base_rate=args.wing_base_rate)
+                              wing_base_rate=args.wing_base_rate,
+                              wing_sizing_mode=args.wing_sizing_mode,
+                              wing_drop_worst_leg=args.wing_drop_worst_leg,
+                              wing_max_sum_3=args.wing_max_sum_3)
     print(f"\nstrategy:  {args.strategy}  fire_mode={args.fire_mode}  "
           f"min_margin={args.min_margin}  base_rate={args.base_rate}  "
           f"smooth_sigma={args.smooth_sigma}  force_adjacency={args.force_adjacency}  "

@@ -456,6 +456,8 @@ def run_wing_strategy(
     min_ev_pct: float = 0.0,
     require_agreement: bool = True,
     base_rate: float | None = None,
+    sizing_mode: str = "equal_payout",
+    drop_worst_leg: bool = False,
 ) -> StrategyOutput:
     """3-bucket wing: cover modal + both positional adjacents.
 
@@ -516,6 +518,12 @@ def run_wing_strategy(
         return StrategyOutput(targets=[], diagnostics={
             **diag_base, "reason": f"modal at edge of layout (wing size {len(wing)})"})
 
+    # Optionally drop the leg with worst per-leg EV (p_model - c) BEFORE filters
+    if drop_worst_leg and len(wing) > 2:
+        edges = [(c, bucket_prob(pmf_values, c.bucket_spec) - c.yes_ask) for c in wing]
+        worst_c, worst_edge = min(edges, key=lambda x: x[1])
+        wing = [c for c in wing if c is not worst_c]
+
     sum_asks = sum(c.yes_ask for c in wing)
     p_top_wing = sum(bucket_prob(pmf_values, c.bucket_spec) for c in wing)
 
@@ -557,17 +565,27 @@ def run_wing_strategy(
             **diag_base, "reason": "kelly <= 0", "throttle": throttle})
 
     total_stake_usd = f_stake * bankroll_usd
-    K = total_stake_usd / sum_asks                # payout target per leg
+    K = total_stake_usd / sum_asks                # payout target per leg (equal-payout interpretation)
+    max_per_contract_usd = cfg.per_contract_max_pct * bankroll_usd
+
+    # Compute per-leg stake based on sizing mode
+    p_legs = [bucket_prob(pmf_values, c.bucket_spec) for c in wing]
+    if sizing_mode == "prob_weighted":
+        sum_p = sum(p_legs) or 1.0
+        leg_stake_usd = [total_stake_usd * (p / sum_p) for p in p_legs]
+    elif sizing_mode == "equal_payout":
+        # Equal payout: x_i = K * c_i  (yields n_i = K for all i)
+        leg_stake_usd = [K * c.yes_ask for c in wing]
+    else:
+        raise ValueError(f"unknown sizing_mode: {sizing_mode!r}")
 
     targets: list[TargetPosition] = []
-    max_per_contract_usd = cfg.per_contract_max_pct * bankroll_usd
-    for c in wing:
-        n = int(K)                                # equal-payout: contracts = K per leg
+    for c, p_model_this, stake_usd in zip(wing, p_legs, leg_stake_usd):
+        n = int(stake_usd / max(c.yes_ask, 0.01))
         n_cap = int(max_per_contract_usd / max(c.yes_ask, 0.01))
         n = min(n, n_cap)
         if n <= 0:
             continue
-        p_model_this = bucket_prob(pmf_values, c.bucket_spec)
         targets.append(TargetPosition(
             ticker=c.ticker, side="yes", target_contracts=n,
             limit_price_cents=int(round(c.yes_ask * 100)),
@@ -575,6 +593,7 @@ def run_wing_strategy(
             rationale={
                 "strategy":      "wing",
                 "role":          "modal" if c == model_modal_c else "wing",
+                "sizing_mode":   sizing_mode,
                 "p_model":       float(p_model_this),
                 "p_market":      float(c.yes_ask / sum_asks),
                 "kelly_f":       float(kelly_full),
@@ -587,9 +606,10 @@ def run_wing_strategy(
             },
         ))
 
-    if len(targets) < 3:
+    min_legs = 2 if drop_worst_leg else 3
+    if len(targets) < min_legs:
         return StrategyOutput(targets=[], diagnostics={
-            **diag_base, "reason": f"only {len(targets)} legs after caps"})
+            **diag_base, "reason": f"only {len(targets)} legs after caps (need >= {min_legs})"})
 
     logger.info(
         "wing: modal=%s sum_3=%.3f p_top_wing=%.3f ev=%.3f kelly=%.3f throttle=%.2f",

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.key
+*.pem
+
+# Herbie cache (if it lands locally)
+hrrr/
+*.grib2
+*.grib2.idx
+
+# Logs (backfill_hrrr.py writes a multi-hundred-MB log)
+*.log
+
+# Local Claude Code agent state
+.claude/
+
+# Data parquets are derivable from refresh_data.py / backfill_hrrr.py
+data/*.parquet

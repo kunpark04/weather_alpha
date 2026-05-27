@@ -445,6 +445,165 @@ def run_two_bucket_arbitrage(
     )
 
 
+def run_wing_strategy(
+    cfg: StrategyCfg,
+    prediction: Prediction,
+    contracts: list[KalshiContract],
+    feature_row: pd.Series | None,
+    bankroll_usd: float,
+    *,
+    max_sum_3: float = 0.97,
+    min_ev_pct: float = 0.0,
+    require_agreement: bool = True,
+    base_rate: float | None = None,
+) -> StrategyOutput:
+    """3-bucket wing: cover modal + both positional adjacents.
+
+    Concept: instead of trading model-vs-market disagreement (which loses), trade
+    AGREEMENT days using the wing to capture the ~87.8% top-3 hit rate at a small
+    per-trade edge. Many small wins, occasional losses.
+
+    Fires when:
+      - >= 3 live contracts with modal not at layout edge
+      - (require_agreement=True) model's modal matches market's modal
+      - sum_3 < max_sum_3 (room for any positive return)
+      - p_top_wing > sum_3 + min_ev_pct (positive EV after the miss case)
+
+    Sizing: equal-payout K*c_i per leg. Whichever leg hits, same dollar profit.
+    Kelly on the binary "in wing or not" bet.
+    """
+    from forecast_alpha.pmf import bucket_lower_bound, bucket_prob
+
+    live = [c for c in contracts if c.is_live]
+    if len(live) < 3:
+        return StrategyOutput(targets=[], diagnostics={"reason": "need >= 3 live contracts"})
+
+    pmf_values = prediction.pmf.values
+    scored = sorted(
+        [(c, bucket_prob(pmf_values, c.bucket_spec)) for c in live],
+        key=lambda x: -x[1],
+    )
+    model_modal_c, _ = scored[0]
+    market_modal_c = max(live, key=lambda c: c.yes_ask)
+    agreement = model_modal_c.ticker == market_modal_c.ticker
+
+    diag_base = {
+        "strategy":     "wing",
+        "agreement":    agreement,
+        "model_modal":  model_modal_c.bucket_spec,
+        "market_modal": market_modal_c.bucket_spec,
+    }
+
+    if require_agreement and not agreement:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": "model-market disagreement (require_agreement=True)"})
+
+    # Find modal's position in the layout
+    sorted_by_pos = sorted(live, key=lambda c: bucket_lower_bound(c.bucket_spec))
+    try:
+        modal_pos = sorted_by_pos.index(model_modal_c)
+    except ValueError:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": "modal not found in sorted layout"})
+
+    # Build wing: modal + both positional adjacents
+    wing: list[KalshiContract] = [model_modal_c]
+    if modal_pos > 0:
+        wing.append(sorted_by_pos[modal_pos - 1])
+    if modal_pos < len(sorted_by_pos) - 1:
+        wing.append(sorted_by_pos[modal_pos + 1])
+    if len(wing) < 3:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"modal at edge of layout (wing size {len(wing)})"})
+
+    sum_asks = sum(c.yes_ask for c in wing)
+    p_top_wing = sum(bucket_prob(pmf_values, c.bucket_spec) for c in wing)
+
+    # Use base_rate override if provided (e.g., empirical hit rate on agreement days);
+    # otherwise trust the model's per-day p_top_wing.
+    p_used = base_rate if base_rate is not None else p_top_wing
+    ev_margin = p_used - sum_asks
+
+    diag_base.update({
+        "sum_asks_3":   sum_asks,
+        "p_top_wing":   p_top_wing,
+        "p_used":       p_used,
+        "ev_margin":    ev_margin,
+    })
+
+    if sum_asks >= max_sum_3:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"sum_asks_3 {sum_asks:.3f} >= max {max_sum_3}"})
+
+    if ev_margin < min_ev_pct:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"EV margin {ev_margin:.3f} < min {min_ev_pct}"})
+
+    throttle = _regime_throttle(cfg.regime_throttle, prediction, feature_row)
+    if throttle <= 0:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": "throttle zeroed"})
+
+    # Binary Kelly on the wing-or-miss bet (uses p_used, which may be base_rate)
+    b = (1.0 - sum_asks) / sum_asks
+    q = 1.0 - p_used
+    kelly_full = max(0.0, (b * p_used - q) / b)
+    f_stake = min(
+        kelly_full * cfg.kelly_fraction * throttle,
+        cfg.total_exposure_max_pct,
+    )
+    if f_stake <= 0:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": "kelly <= 0", "throttle": throttle})
+
+    total_stake_usd = f_stake * bankroll_usd
+    K = total_stake_usd / sum_asks                # payout target per leg
+
+    targets: list[TargetPosition] = []
+    max_per_contract_usd = cfg.per_contract_max_pct * bankroll_usd
+    for c in wing:
+        n = int(K)                                # equal-payout: contracts = K per leg
+        n_cap = int(max_per_contract_usd / max(c.yes_ask, 0.01))
+        n = min(n, n_cap)
+        if n <= 0:
+            continue
+        p_model_this = bucket_prob(pmf_values, c.bucket_spec)
+        targets.append(TargetPosition(
+            ticker=c.ticker, side="yes", target_contracts=n,
+            limit_price_cents=int(round(c.yes_ask * 100)),
+            bucket_spec=c.bucket_spec,
+            rationale={
+                "strategy":      "wing",
+                "role":          "modal" if c == model_modal_c else "wing",
+                "p_model":       float(p_model_this),
+                "p_market":      float(c.yes_ask / sum_asks),
+                "kelly_f":       float(kelly_full),
+                "scaled_kelly":  float(f_stake),
+                "exposure_frac": float(n * c.yes_ask / max(bankroll_usd, 1e-9)),
+                "confidence":    float(p_top_wing),
+                "throttle":      float(throttle),
+                "agreement":     agreement,
+                "ev_margin":     float(ev_margin),
+            },
+        ))
+
+    if len(targets) < 3:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"only {len(targets)} legs after caps"})
+
+    logger.info(
+        "wing: modal=%s sum_3=%.3f p_top_wing=%.3f ev=%.3f kelly=%.3f throttle=%.2f",
+        model_modal_c.bucket_spec, sum_asks, p_top_wing, ev_margin, kelly_full, throttle,
+    )
+    return StrategyOutput(targets=targets, diagnostics={
+        **diag_base, "n_targets": len(targets),
+        "kelly_full":     kelly_full,
+        "f_stake":        f_stake,
+        "throttle":       throttle,
+        "deployed_usd":   sum(int(t.target_contracts * t.limit_price_cents / 100) for t in targets),
+    })
+
+
 def run_hard_floor_strategy(
     cfg: StrategyCfg,
     prediction: Prediction,

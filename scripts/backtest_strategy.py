@@ -146,6 +146,7 @@ from forecast_alpha.strategy import (
     run_tail_probability_strategy,
     run_two_bucket_arbitrage,
     run_variance_strategy,
+    run_wing_strategy,
 )
 
 
@@ -307,7 +308,8 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
              smooth_sigma: float = 0.0,
              force_adjacency: bool = False,
              override_lookup: dict | None = None,
-             exit_rule: ExitRule | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+             exit_rule: ExitRule | None = None,
+             wing_base_rate: float | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     art = load_artifacts(cfg.paths.model_dir)
     cli_truth = {pd.Timestamp(d).normalize(): int(v)
                  for d, v in cli[["date", "max_temp_f"]].dropna().itertuples(index=False, name=None)}
@@ -382,6 +384,17 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
         elif strategy_name == "variance":
             strat_out = run_variance_strategy(
                 cfg.strategy, pred, contracts, feature_row, bankroll,
+            )
+        elif strategy_name == "wing":
+            strat_out = run_wing_strategy(
+                cfg.strategy, pred, contracts, feature_row, bankroll,
+                base_rate=wing_base_rate,
+            )
+        elif strategy_name == "wing_any":
+            strat_out = run_wing_strategy(
+                cfg.strategy, pred, contracts, feature_row, bankroll,
+                require_agreement=False,
+                base_rate=wing_base_rate,
             )
         else:
             strat_out = run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
@@ -546,7 +559,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="half-spread added to trade-price to approximate ask (default 2¢)")
     ap.add_argument("--strategy",
                     choices=["joint_kelly", "two_bucket_arb", "tail", "hrrr_bias",
-                             "regime_confident", "hard_floor", "variance"],
+                             "regime_confident", "hard_floor", "variance",
+                             "wing", "wing_any"],
                     default="joint_kelly", help="which strategy module to backtest")
     ap.add_argument("--min-margin", type=float, default=0.05,
                     help="(two_bucket_arb ev_gate) minimum EV margin p_top2 - sum_asks before firing")
@@ -568,6 +582,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Intraday exit: close all positions at hour H local (e.g., 20 = 8 PM).")
     ap.add_argument("--hold-confidence-floor", type=float, default=None,
                     help="Hold position to settlement only if rationale.confidence > X (else use intraday rules).")
+    ap.add_argument("--wing-base-rate", type=float, default=None,
+                    help="(wing/wing_any) override model's p_top_wing with this fixed base rate (e.g., 0.95).")
     ap.add_argument("--out", default="data/backtest_results.parquet")
     args = ap.parse_args(argv)
 
@@ -604,7 +620,8 @@ def main(argv: list[str] | None = None) -> int:
                               smooth_sigma=args.smooth_sigma,
                               force_adjacency=args.force_adjacency,
                               override_lookup=override_lookup,
-                              exit_rule=exit_rule)
+                              exit_rule=exit_rule,
+                              wing_base_rate=args.wing_base_rate)
     print(f"\nstrategy:  {args.strategy}  fire_mode={args.fire_mode}  "
           f"min_margin={args.min_margin}  base_rate={args.base_rate}  "
           f"smooth_sigma={args.smooth_sigma}  force_adjacency={args.force_adjacency}  "

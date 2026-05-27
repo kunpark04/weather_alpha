@@ -15,6 +15,7 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "forecast_alpha.yaml"
 
 Mode = Literal["paper", "live"]
 FillModel = Literal["ask", "mid", "bid"]
+AsosSource = Literal["iem", "synoptic", "auto"]
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,19 @@ class KalshiCfg:
 
 
 @dataclass(frozen=True)
+class DataCfg:
+    """Live-data routing knobs. `asos_source = auto` uses Synoptic when
+    SYNOPTIC_TOKEN is present, falls back to IEM otherwise."""
+    asos_source: AsosSource
+    synoptic_token_env: str
+    metar_obs_limit: int
+    taf_hours_back: int
+    asos_hours_back: int
+    cli_days_back: int
+    hrrr_publish_lag_min: int
+
+
+@dataclass(frozen=True)
 class SchedulerCfg:
     anchor_grace_minutes: int
     data_refresh_minutes: int
@@ -97,12 +111,23 @@ class Config:
     strategy: StrategyCfg
     execution: ExecutionCfg
     kalshi: KalshiCfg
+    data: DataCfg
     scheduler: SchedulerCfg
     risk: RiskCfg
     ui: UICfg
 
     def is_live(self) -> bool:
         return self.mode == "live"
+
+    def resolved_asos_source(self) -> str:
+        """Resolve `auto` -> `synoptic` if token present else `iem`."""
+        if self.data.asos_source != "auto":
+            return self.data.asos_source
+        return "synoptic" if os.environ.get(self.data.synoptic_token_env, "").strip() else "iem"
+
+    def synoptic_token(self) -> str | None:
+        token = os.environ.get(self.data.synoptic_token_env, "").strip()
+        return token or None
 
 
 def _abs(path_str: str) -> Path:
@@ -144,6 +169,7 @@ def load_config(path: Path | str | None = None) -> Config:
     )
     execution = ExecutionCfg(**raw["execution"])
     kalshi = KalshiCfg(**raw["kalshi"])
+    data = DataCfg(**raw["data"])
     scheduler = SchedulerCfg(**raw["scheduler"])
     risk = RiskCfg(**raw["risk"])
     ui = UICfg(**raw["ui"])
@@ -157,6 +183,7 @@ def load_config(path: Path | str | None = None) -> Config:
         strategy=strategy,
         execution=execution,
         kalshi=kalshi,
+        data=data,
         scheduler=scheduler,
         risk=risk,
         ui=ui,

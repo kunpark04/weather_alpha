@@ -94,6 +94,7 @@ def build_features(
     target_df = target_df[target_df["date"] >= keep_start].reset_index(drop=True)
 
     # ---- namespace seeded with everything the §3 cells expect to see
+    data_dir = Path(notebook_path).parent.parent / "data"
     ns: dict[str, Any] = {
         # parquets
         "metar":      bundle.metar,
@@ -102,6 +103,9 @@ def build_features(
         "cli":        cli,
         "hrrr":       bundle.hrrr,
         "target_df":  target_df,
+        # paths used by §3 cells that re-read parquets directly
+        "DATA_DIR":   data_dir,
+        "Path":       Path,
         # constants — match the names the notebook expects
         "STATION":               art.station,
         "TARGET_COL":            art.target_col,

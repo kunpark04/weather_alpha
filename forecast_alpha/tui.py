@@ -158,7 +158,7 @@ class ForecastAlphaApp(App):
         try:
             if action == Action.DATA_REFRESH:
                 logger.info("scheduler -> DATA_REFRESH")
-                await asyncio.to_thread(refresh_data, self._cfg)
+                await refresh_data(self._cfg)
             elif action in (Action.ANCHOR, Action.INTRADAY):
                 logger.info("scheduler -> %s", action.value.upper())
                 result = await run_cycle(self._cfg, self._art, self._book, self._kalshi,

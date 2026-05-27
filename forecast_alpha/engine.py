@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from forecast_alpha.config import Config
-from forecast_alpha.data import DataBundle, latest_viable_anchor, load_bundle, refresh_hrrr, refresh_iem
+from forecast_alpha.data import DataBundle, latest_viable_anchor, load_bundle, refresh_live
 from forecast_alpha.execution import ExecutionResult, execute, reconcile_settlements
 from forecast_alpha.features import build_features
 from forecast_alpha.kalshi import KalshiClient
@@ -37,11 +37,22 @@ class CycleResult:
     diagnostics: dict = field(default_factory=dict)
 
 
-def refresh_data(cfg: Config) -> None:
-    """Run both data-refresh subprocesses. Slow (~30–60s). Call from scheduler at cadence."""
-    project_root = Path(cfg.paths.data_dir).parent
-    refresh_iem(project_root)
-    refresh_hrrr(project_root, cfg.local_tz)
+async def refresh_data(cfg: Config, anchor_dt_local: pd.Timestamp | None = None) -> dict[str, int]:
+    """In-process parallel fetch of all 5 weather sources → merge into parquets.
+
+    Replaces the old subprocess wrappers. Wall time ~3–5 s vs ~30–90 s before.
+    Anchor defaults to "now" — HRRR auto-picks the latest safely-published init.
+    """
+    if anchor_dt_local is None:
+        anchor_dt_local = pd.Timestamp.now(tz=cfg.local_tz)
+    return await refresh_live(
+        station=cfg.station,
+        anchor_dt_local=anchor_dt_local,
+        data_dir=cfg.paths.data_dir,
+        local_tz=cfg.local_tz,
+        asos_source=cfg.resolved_asos_source(),
+        synoptic_token=cfg.synoptic_token(),
+    )
 
 
 async def run_cycle(
@@ -55,7 +66,7 @@ async def run_cycle(
 ) -> CycleResult:
     """Run one anchor cycle: predict → strategize → execute → settle reconcile."""
     if not skip_refresh:
-        refresh_data(cfg)
+        await refresh_data(cfg, anchor_dt_local=force_anchor)
 
     bundle = load_bundle(cfg.paths.data_dir, cfg.station)
 

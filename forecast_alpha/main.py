@@ -89,7 +89,7 @@ async def _run_headless(cfg, art, book, args) -> int:
             while True:
                 action = scheduler.due()
                 if action == Action.DATA_REFRESH:
-                    refresh_data(cfg)
+                    await refresh_data(cfg)
                     scheduler.record(action)
                 elif action in (Action.ANCHOR, Action.INTRADAY):
                     result = await run_cycle(cfg, art, book, kalshi,

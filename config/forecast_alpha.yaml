@@ -42,6 +42,18 @@ kalshi:
   rest_poll_seconds: 30
   request_timeout_seconds: 15
 
+data:
+  # ASOS source: iem (24-48h lag, no key), synoptic (sub-minute, needs SYNOPTIC_TOKEN),
+  # or auto (use synoptic when token is set, else iem).
+  asos_source: auto
+  synoptic_token_env: SYNOPTIC_TOKEN
+  # Live-fetch windows (per source)
+  metar_obs_limit: 40             # api.weather.gov observations to pull
+  taf_hours_back: 36
+  asos_hours_back: 48
+  cli_days_back: 30
+  hrrr_publish_lag_min: 90        # how long after init we treat an HRRR run as safely published
+
 scheduler:
   anchor_grace_minutes: 5         # wait N minutes past anchor before reading features
   data_refresh_minutes: 15

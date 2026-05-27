@@ -1,20 +1,24 @@
-"""Data layer — refresh IEM + HRRR parquets, load them, pick an anchor.
+"""Data layer — real-time in-process refresh, bundle load, anchor selection.
 
-Wraps the existing `refresh_data.py` and `backfill_hrrr.py` scripts as
-subprocesses (inherits the calling Python so metar/herbie env stays consistent).
-Mirrors live_predict.ipynb §2.
+The hot path (`refresh_live`) calls `live_fetchers.fetch_all_live` once per
+anchor cycle, then merges results into the existing parquet store via the same
+incremental upsert pattern `refresh_data.py` uses. No subprocesses, no shell
+overhead, full schema parity with the historical data the model was trained on.
+
+Use the standalone scripts (`python refresh_data.py`, `python backfill_hrrr.py`)
+only for cold-start historical backfill — the production engine never touches them.
 """
 
 from __future__ import annotations
 
 import logging
-import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+
+from forecast_alpha.live_fetchers import fetch_all_live
 
 logger = logging.getLogger(__name__)
 
@@ -28,65 +32,93 @@ class DataBundle:
     hrrr: pd.DataFrame
 
 
-def refresh_iem(project_root: Path, timeout: int = 600) -> None:
-    """Run refresh_data.py to update METAR/TAF/ASOS/CLI parquets."""
-    script = project_root / "refresh_data.py"
-    if not script.exists():
-        raise FileNotFoundError(f"refresh_data.py not found at {script}")
+# Per-source merge specs — must match the historical parquet dedupe columns
+# from refresh_data.py (so live + historical rows interleave cleanly).
+_MERGE_SPEC = {
+    "metar": dict(ts_col="timestamp", dedupe_cols=["timestamp", "report_type", "mod"]),
+    "taf":   dict(ts_col="valid",     dedupe_cols=["valid", "fx_valid", "ftype", "raw"]),
+    "asos":  dict(ts_col="timestamp", dedupe_cols=["timestamp"]),
+    "cli":   dict(ts_col="date",      dedupe_cols=["date"]),
+    "hrrr":  dict(ts_col="valid_utc", dedupe_cols=["date", "fxx"]),
+}
 
-    logger.info("Refreshing IEM parquets via %s ...", script.name)
+
+def _parquet_path(data_dir: Path, source: str, station: str) -> Path:
+    if source == "hrrr":
+        return data_dir / f"hrrr_12z_{station}.parquet"
+    return data_dir / f"{source}_{station}.parquet"
+
+
+def merge_into_parquet(source: str, new_df: pd.DataFrame, path: Path) -> tuple[int, int]:
+    """Upsert `new_df` into the parquet at `path`. Returns (rows_added, total_after).
+
+    Mirrors `refresh_data.py:_refresh`'s dedupe-and-merge pattern. Idempotent.
+    Skips the disk write entirely when no new rows would land (cheap no-op for
+    every-cycle refreshes that catch a stale upstream).
+    """
+    if new_df is None or new_df.empty:
+        return 0, _count(path)
+
+    spec = _MERGE_SPEC[source]
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new_df.sort_values(spec["ts_col"]).reset_index(drop=True).to_parquet(path)
+        return len(new_df), len(new_df)
+
+    existing = pd.read_parquet(path)
+    combined = pd.concat([existing, new_df], ignore_index=True, sort=False)
+    combined = combined.drop_duplicates(subset=spec["dedupe_cols"], keep="last")
+    added = len(combined) - len(existing)
+    if added == 0:
+        return 0, len(existing)
+    combined = combined.sort_values(spec["ts_col"]).reset_index(drop=True)
+    combined.to_parquet(path)
+    return added, len(combined)
+
+
+def _count(path: Path) -> int:
+    return len(pd.read_parquet(path)) if path.exists() else 0
+
+
+async def refresh_live(
+    station: str,
+    anchor_dt_local: pd.Timestamp,
+    data_dir: Path,
+    *,
+    local_tz: str = "America/Chicago",
+    asos_source: str = "iem",
+    synoptic_token: str | None = None,
+) -> dict[str, int]:
+    """Fetch all 5 sources in parallel, merge into parquets. Returns per-source
+    row counts after merge. ~3–5 s wall time on a healthy network.
+    """
     t0 = time.perf_counter()
-    proc = subprocess.run(
-        [sys.executable, str(script)],
-        capture_output=True, text=True, cwd=project_root, timeout=timeout,
+    fetched = await fetch_all_live(
+        station=station, anchor_dt_local=anchor_dt_local,
+        local_tz=local_tz, asos_source=asos_source,
+        synoptic_token=synoptic_token, data_dir=data_dir,
     )
-    if proc.returncode != 0:
-        logger.error("refresh_data.py failed (rc=%d):\n%s", proc.returncode, proc.stderr[-2000:])
-        raise RuntimeError("refresh_data.py failed")
-    logger.info("IEM refresh complete in %.1fs", time.perf_counter() - t0)
-
-
-def refresh_hrrr(
-    project_root: Path,
-    local_tz: str,
-    lookback_days: int = 4,
-    threads: int = 4,
-    timeout: int = 1800,
-) -> None:
-    """Run backfill_hrrr.py to fill any missing recent HRRR runs."""
-    script = project_root / "backfill_hrrr.py"
-    if not script.exists():
-        raise FileNotFoundError(f"backfill_hrrr.py not found at {script}")
-
-    hstart = (pd.Timestamp.now(tz=local_tz).normalize() - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-    hend = pd.Timestamp.now(tz=local_tz).normalize().strftime("%Y-%m-%d")
-
-    logger.info("Extending HRRR coverage %s -> %s ...", hstart, hend)
-    t0 = time.perf_counter()
-    proc = subprocess.run(
-        [sys.executable, str(script), "--start", hstart, "--end", hend, "--threads", str(threads)],
-        capture_output=True, text=True, cwd=project_root, timeout=timeout,
-    )
-    if proc.returncode != 0:
-        logger.warning(
-            "backfill_hrrr.py returned rc=%d (HRRR may be stale):\n%s",
-            proc.returncode, proc.stderr[-1500:],
-        )
-    logger.info("HRRR refresh complete in %.1fs", time.perf_counter() - t0)
+    added: dict[str, int] = {}
+    for source, df in fetched.items():
+        if df is None:
+            added[source] = -1
+            continue
+        path = _parquet_path(data_dir, source, station)
+        delta, _total = merge_into_parquet(source, df, path)
+        added[source] = delta
+    dt = time.perf_counter() - t0
+    logger.info("refresh_live %.2fs  %s", dt,
+                {k: (f"+{added[k]}" if added[k] >= 0 else "FAIL") for k in added})
+    return added
 
 
 def load_bundle(data_dir: Path, station: str) -> DataBundle:
-    """Load all five parquets into a DataBundle. Fail loudly on missing files."""
-    paths = {
-        "metar": data_dir / f"metar_{station}.parquet",
-        "taf":   data_dir / f"taf_{station}.parquet",
-        "asos":  data_dir / f"asos_{station}.parquet",
-        "cli":   data_dir / f"cli_{station}.parquet",
-        "hrrr":  data_dir / f"hrrr_12z_{station}.parquet",
-    }
+    """Load all 5 parquets. Fail loudly on missing files."""
+    paths = {src: _parquet_path(data_dir, src, station)
+             for src in ("metar", "taf", "asos", "cli", "hrrr")}
     missing = [n for n, p in paths.items() if not p.exists()]
     if missing:
-        raise FileNotFoundError(f"missing parquets: {missing} (run refresh first)")
+        raise FileNotFoundError(f"missing parquets: {missing}")
     return DataBundle(
         metar=pd.read_parquet(paths["metar"]),
         taf=pd.read_parquet(paths["taf"]),
@@ -103,10 +135,8 @@ def latest_viable_anchor(
     now_local: pd.Timestamp | None = None,
     max_lookback_days: int = 30,
 ) -> pd.Timestamp:
-    """Latest local-time date where wall-clock is past T_HOUR_LOCAL AND METAR/TAF/ASOS
-    each have an obs ≥ T_utc AND HRRR covers the date.
-
-    Returns a naive (tz-stripped), normalized pd.Timestamp.
+    """Latest local-day where wall-clock past T_HOUR_LOCAL AND METAR/TAF/ASOS each
+    have an obs ≥ T_utc AND HRRR covers the date. Returns naive normalized ts.
     """
     if now_local is None:
         now_local = pd.Timestamp.now(tz=local_tz)
@@ -121,11 +151,9 @@ def latest_viable_anchor(
         anchor_t_local = candidate + pd.Timedelta(hours=t_hour_local)
         anchor_t_utc = anchor_t_local.tz_convert("UTC")
         past_T = now_local >= anchor_t_local
-        iem_fresh = (
-            metar_latest >= anchor_t_utc
-            and taf_latest >= anchor_t_utc
-            and asos_latest >= anchor_t_utc
-        )
+        iem_fresh = (metar_latest >= anchor_t_utc
+                     and taf_latest >= anchor_t_utc
+                     and asos_latest >= anchor_t_utc)
         hrrr_covered = candidate.tz_localize(None).normalize() in hrrr_dates
         if past_T and iem_fresh and hrrr_covered:
             return candidate.tz_localize(None).normalize()

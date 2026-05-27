@@ -51,6 +51,53 @@ def bucket_lower_bound(spec) -> float:
         return 0.0
 
 
+def bucket_upper_bound(spec) -> float | None:
+    """Numeric upper bound for a Kalshi bucket. Returns None for open-ended (`>=K`)."""
+    s = str(spec).strip()
+    if s.startswith("<="):
+        return float(s[2:])
+    if s.startswith("<"):
+        return float(s[1:]) - 1.0
+    if s.startswith(">="):
+        return None
+    if s.startswith(">"):
+        return None
+    if "-" in s and not s.startswith("-"):
+        parts = s.split("-")
+        try:
+            return float(parts[1])
+        except (ValueError, IndexError):
+            return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def bucket_midpoint(spec) -> float:
+    """Approximate midpoint for moment calculations. Open-ended buckets use the
+    bound + 1.5°F as a rough representative value."""
+    s = str(spec).strip()
+    if s.startswith("<="):
+        return float(s[2:]) - 1.0
+    if s.startswith("<"):
+        return float(s[1:]) - 1.5
+    if s.startswith(">="):
+        return float(s[2:]) + 1.0
+    if s.startswith(">"):
+        return float(s[1:]) + 1.5
+    if "-" in s and not s.startswith("-"):
+        parts = s.split("-")
+        try:
+            return (float(parts[0]) + float(parts[1])) / 2.0
+        except (ValueError, IndexError):
+            return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
 # ---------------------------------------------------------------------------
 # Quantile → integer-°F PMF (Chernozhukov rearrangement + piecewise-linear CDF)
 # ---------------------------------------------------------------------------

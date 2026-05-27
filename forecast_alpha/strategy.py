@@ -445,6 +445,225 @@ def run_two_bucket_arbitrage(
     )
 
 
+def run_hard_floor_strategy(
+    cfg: StrategyCfg,
+    prediction: Prediction,
+    contracts: list[KalshiContract],
+    feature_row: pd.Series | None,
+    bankroll_usd: float,
+) -> StrategyOutput:
+    """Buy NO on buckets that are MATHEMATICALLY IMPOSSIBLE at the anchor.
+
+    Daily max is monotonically non-decreasing. If `running_max_F_T_hard` (the
+    METAR-derived running maximum through 1 PM) already exceeds a bucket's
+    upper bound, the bucket cannot possibly resolve YES. Buy NO at no_ask < $1
+    for guaranteed payoff. Empirically verified: 0 violations in 2,288 OOF
+    days, so this is structural alpha, not probability.
+
+    Sizing: capped at per_contract_max_pct (NOT Kelly — Kelly says go all-in
+    on certain outcomes, which has unacceptable concentration risk despite
+    being correct probabilistically).
+    """
+    from forecast_alpha.pmf import bucket_upper_bound
+
+    if feature_row is None:
+        return StrategyOutput(targets=[], diagnostics={"reason": "no feature_row"})
+    rm = feature_row.get("running_max_F_T_hard")
+    if rm is None or pd.isna(rm):
+        return StrategyOutput(targets=[], diagnostics={"reason": "running_max NaN"})
+    rm_F = int(rm)
+
+    live = [c for c in contracts if c.is_live]
+    if not live:
+        return StrategyOutput(targets=[], diagnostics={"reason": "no live contracts"})
+
+    targets: list[TargetPosition] = []
+    impossible_specs: list[str] = []
+    for c in live:
+        ub = bucket_upper_bound(c.bucket_spec)
+        if ub is None:                            # open-ended high tail — never impossible from below
+            continue
+        if rm_F <= ub:                            # not impossible
+            continue
+        impossible_specs.append(c.bucket_spec)
+
+        # Net edge per contract: pay no_ask, receive $1, minus fee
+        if c.no_ask >= 1.0:
+            continue                              # can't profit
+        gross_per_contract_cents = (1.0 - c.no_ask) * 100
+
+        # Cap sizing at per-contract max regardless of "certainty" (Kelly says all-in).
+        max_usd = cfg.per_contract_max_pct * bankroll_usd
+        n = int(max_usd / max(c.no_ask, 0.01))
+        if n <= 0:
+            continue
+
+        fee = trade_fee_cents(c.no_ask, n)
+        net_cents = gross_per_contract_cents * n - fee
+        if net_cents <= 0:
+            continue
+
+        targets.append(TargetPosition(
+            ticker=c.ticker, side="no", target_contracts=n,
+            limit_price_cents=int(round(c.no_ask * 100)),
+            bucket_spec=c.bucket_spec,
+            rationale={
+                "strategy":         "hard_floor",
+                "running_max_F":    rm_F,
+                "bucket_upper_F":   ub,
+                "margin_F":         rm_F - ub,
+                "no_ask":           c.no_ask,
+                "structural_arb":   True,
+                "expected_net_cents": float(net_cents),
+                "exposure_frac":    float(n * c.no_ask / max(bankroll_usd, 1e-9)),
+            },
+        ))
+
+    return StrategyOutput(targets=targets, diagnostics={
+        "strategy":          "hard_floor",
+        "running_max_F":     rm_F,
+        "n_impossible":      len(impossible_specs),
+        "impossible_specs":  ",".join(impossible_specs) if impossible_specs else "none",
+        "n_targets":         len(targets),
+    })
+
+
+def run_variance_strategy(
+    cfg: StrategyCfg,
+    prediction: Prediction,
+    contracts: list[KalshiContract],
+    feature_row: pd.Series | None,
+    bankroll_usd: float,
+    *,
+    var_diff_threshold_F2: float = 4.0,
+) -> StrategyOutput:
+    """Bet on dispersion difference between model PMF and market-implied PMF.
+
+    Compute variance of each over the 6 bucket midpoints. If model_var <
+    market_var - threshold (model is tighter), market is over-pricing
+    uncertainty: BUY NO on wings, BUY YES on body. If model_var > market_var +
+    threshold (model is wider), do the opposite.
+
+    Unlike joint-Kelly per-bucket, this is a SHAPE/MOMENT bet — fires only
+    when the aggregate distribution shape differs, and trades the wings
+    against the body as a structured spread.
+    """
+    from forecast_alpha.pmf import bucket_midpoint, bucket_prob
+
+    live = [c for c in contracts if c.is_live]
+    if len(live) < 4:
+        return StrategyOutput(targets=[], diagnostics={"reason": "need >= 4 contracts"})
+
+    pmf_vals = prediction.pmf.values
+
+    # Per-contract model + market probs
+    rows = []
+    for c in live:
+        p_model = bucket_prob(pmf_vals, c.bucket_spec)
+        rows.append({
+            "c":         c,
+            "spec":      c.bucket_spec,
+            "midpoint":  bucket_midpoint(c.bucket_spec),
+            "p_model":   p_model,
+            "yes_ask":   c.yes_ask,
+            "no_ask":    c.no_ask,
+        })
+
+    # Normalize market probs (yes_ask sums slightly above 1 due to overround)
+    yes_asks = np.array([r["yes_ask"] for r in rows])
+    p_market = yes_asks / yes_asks.sum()
+    p_model_arr = np.array([r["p_model"] for r in rows])
+    midpoints = np.array([r["midpoint"] for r in rows])
+
+    # Compute moments (over the 6-point discretization for fair comparison)
+    model_mean = (p_model_arr * midpoints).sum()
+    model_var = (p_model_arr * (midpoints - model_mean) ** 2).sum()
+    market_mean = (p_market * midpoints).sum()
+    market_var = (p_market * (midpoints - market_mean) ** 2).sum()
+    var_diff = model_var - market_var
+
+    diag_base = {
+        "strategy":     "variance",
+        "model_mean":   float(model_mean),
+        "model_var":    float(model_var),
+        "market_mean":  float(market_mean),
+        "market_var":   float(market_var),
+        "var_diff":     float(var_diff),
+    }
+
+    if abs(var_diff) < var_diff_threshold_F2:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"|var_diff|={abs(var_diff):.2f} < threshold {var_diff_threshold_F2}"})
+
+    # Identify wings vs body: tail buckets are the "<=K" and ">=K+7" contracts
+    is_wing = [str(r["spec"]).startswith("<") or str(r["spec"]).startswith(">") for r in rows]
+
+    # Direction: var_diff < 0 → model is TIGHTER → market over-prices wings
+    #            → SELL wings (BUY NO on wings) + BUY YES on body
+    #            var_diff > 0 → model is WIDER  → market under-prices wings
+    #            → BUY YES on wings + BUY NO on body
+    if var_diff < 0:
+        wing_side, body_side = "no", "yes"
+    else:
+        wing_side, body_side = "yes", "no"
+
+    throttle = _regime_throttle(cfg.regime_throttle, prediction, feature_row)
+    targets: list[TargetPosition] = []
+    deployed = 0.0
+
+    for r, wing in zip(rows, is_wing):
+        c = r["c"]
+        side = wing_side if wing else body_side
+        price = c.yes_ask if side == "yes" else c.no_ask
+        p_win = r["p_model"] if side == "yes" else (1.0 - r["p_model"])
+        net_ev = net_ev_cents(p_win, price, contracts=1)
+        if net_ev < cfg.edge_floor_cents:
+            continue
+
+        kelly = _kelly_fraction(p_win, price)
+        f_stake = min(
+            kelly * cfg.kelly_fraction * throttle,
+            cfg.per_contract_max_pct,
+        )
+        if f_stake <= 0:
+            continue
+        n = int(f_stake * bankroll_usd / max(price, 0.01))
+        if n <= 0:
+            continue
+
+        targets.append(TargetPosition(
+            ticker=c.ticker, side=side, target_contracts=n,
+            limit_price_cents=int(round(price * 100)),
+            bucket_spec=c.bucket_spec,
+            rationale={
+                "strategy":      "variance",
+                "role":          "wing" if wing else "body",
+                "var_diff":      float(var_diff),
+                "p_model":       float(r["p_model"]),
+                "p_market":      float(p_market[rows.index(r)]),
+                "net_ev_cents":  float(net_ev),
+                "kelly_f":       float(kelly),
+                "scaled_kelly":  float(f_stake),
+                "exposure_frac": float(n * price / max(bankroll_usd, 1e-9)),
+                "throttle":      float(throttle),
+            },
+        ))
+        deployed += n * price
+
+    # Total exposure cap
+    cap = cfg.total_exposure_max_pct * bankroll_usd
+    if deployed > cap and deployed > 0:
+        scale = cap / deployed
+        targets = [replace(t, target_contracts=max(0, int(t.target_contracts * scale)))
+                   for t in targets]
+        targets = [t for t in targets if t.target_contracts > 0]
+
+    return StrategyOutput(targets=targets, diagnostics={
+        **diag_base, "n_targets": len(targets), "throttle": throttle,
+        "wing_side": wing_side, "body_side": body_side,
+    })
+
+
 def run_tail_probability_strategy(
     cfg: StrategyCfg,
     prediction: Prediction,

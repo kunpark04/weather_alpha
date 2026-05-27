@@ -41,11 +41,13 @@ from forecast_alpha.pmf import (
     INTEGER_F_GRID, bucket_prob, parse_bucket, parse_kalshi_subtitle, smooth_pmf,
 )
 from forecast_alpha.strategy import (
+    run_hard_floor_strategy,
     run_hrrr_bias_strategy,
     run_regime_confident_strategy,
     run_strategy,
     run_tail_probability_strategy,
     run_two_bucket_arbitrage,
+    run_variance_strategy,
 )
 
 
@@ -270,6 +272,14 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
                 smooth_sigma=0.0, force_adjacency=force_adjacency,
                 p_model_override=override,
             )
+        elif strategy_name == "hard_floor":
+            strat_out = run_hard_floor_strategy(
+                cfg.strategy, pred, contracts, feature_row, bankroll,
+            )
+        elif strategy_name == "variance":
+            strat_out = run_variance_strategy(
+                cfg.strategy, pred, contracts, feature_row, bankroll,
+            )
         else:
             strat_out = run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
 
@@ -416,7 +426,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--assumed-spread-cents", type=int, default=2,
                     help="half-spread added to trade-price to approximate ask (default 2¢)")
     ap.add_argument("--strategy",
-                    choices=["joint_kelly", "two_bucket_arb", "tail", "hrrr_bias", "regime_confident"],
+                    choices=["joint_kelly", "two_bucket_arb", "tail", "hrrr_bias",
+                             "regime_confident", "hard_floor", "variance"],
                     default="joint_kelly", help="which strategy module to backtest")
     ap.add_argument("--min-margin", type=float, default=0.05,
                     help="(two_bucket_arb ev_gate) minimum EV margin p_top2 - sum_asks before firing")

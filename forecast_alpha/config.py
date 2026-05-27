@@ -15,7 +15,7 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "forecast_alpha.yaml"
 
 Mode = Literal["paper", "live"]
 FillModel = Literal["ask", "mid", "bid"]
-AsosSource = Literal["iem", "synoptic", "auto"]
+AsosSource = Literal["iem", "synoptic", "metar_substitute", "auto"]
 
 
 @dataclass(frozen=True)
@@ -120,10 +120,15 @@ class Config:
         return self.mode == "live"
 
     def resolved_asos_source(self) -> str:
-        """Resolve `auto` -> `synoptic` if token present else `iem`."""
+        """Resolve `auto` -> `synoptic` if token present, `metar_substitute` otherwise.
+
+        `metar_substitute` is the real-time fallback when no Synoptic key is configured;
+        IEM mode (24-48h lag) is only the result when the user explicitly requests it.
+        """
         if self.data.asos_source != "auto":
             return self.data.asos_source
-        return "synoptic" if os.environ.get(self.data.synoptic_token_env, "").strip() else "iem"
+        return "synoptic" if os.environ.get(self.data.synoptic_token_env, "").strip() \
+                          else "metar_substitute"
 
     def synoptic_token(self) -> str | None:
         token = os.environ.get(self.data.synoptic_token_env, "").strip()

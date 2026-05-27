@@ -241,11 +241,63 @@ def fetch_live_asos_synoptic(station: str, token: str, *, hours_back: int = 48,
     return df
 
 
+def fetch_metar_as_asos(station: str, *, limit: int = 240,
+                        data_dir: Path | None = None) -> pd.DataFrame:
+    """Real-time ASOS substitute derived from api.weather.gov METAR observations.
+
+    Workaround for IEM's 24–48 h ASOS lag when Synoptic isn't available. Pulls the
+    last `limit` observations (hourly METAR + 5-min auto obs), converts temps to
+    whole °F (matching ASOS reporting precision), and returns a DataFrame with the
+    same schema as `asos_KMDW.parquet`.
+
+    Train-serve caveat: the model was trained on true ASOS 1-min readings;
+    METAR is hourly+5min. Aggregations (`running_max_F_T`,
+    `asos_min_temp_f_overnight`) lose 1-min granularity → may miss transient
+    peaks/dips. Estimated quality impact: ~0.1–0.2 °F CRPS degradation.
+    """
+    url = f"{WEATHER_GOV}/stations/{station}/observations?limit={limit}"
+    resp = requests.get(url, headers={"User-Agent": USER_AGENT,
+                                      "Accept": "application/geo+json"}, timeout=30)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    rows = []
+    for feat in payload.get("features", []):
+        props = feat.get("properties", {})
+        ts = pd.to_datetime(props["timestamp"], utc=True)
+        raw = props.get("rawMessage")
+        parsed = _parse_metar(raw) if raw else _parse_api_props(props)
+        temp_c = parsed.get("temp_c")
+        dewp_c = parsed.get("dewp_c")
+        rows.append({
+            "station":   station,
+            "timestamp": ts,
+            "temp_f":    None if temp_c is None else round(temp_c * 9 / 5 + 32),
+            "dewp_f":    None if dewp_c is None else round(dewp_c * 9 / 5 + 32),
+            "wdir":      parsed.get("wdir"),
+            "wspd_kt":   parsed.get("wspd_kt"),
+            "gust_wdir": None,                                  # METAR doesn't expose peak gust dir cleanly
+            "gust_kt":   parsed.get("gust_kt"),
+            "ptype":     None,                                  # METAR has wx string, not categorical ptype
+            "precip_in": parsed.get("p1hr_in"),                 # best-effort, usually None on auto obs
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    for c in ["temp_f", "dewp_f", "wdir", "wspd_kt", "gust_wdir", "gust_kt"]:
+        df[c] = df[c].astype("Int64")
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    if data_dir is not None:
+        df = coerce_to_reference(df, data_dir / f"asos_{station}.parquet")
+    return df
+
+
 def fetch_live_asos(station: str, *, source: str = "iem",
                     synoptic_token: str | None = None,
                     hours_back: int = 48,
                     data_dir: Path | None = None) -> pd.DataFrame:
-    """Dispatch wrapper. `source ∈ {iem, synoptic}`. Falls back to IEM on Synoptic errors."""
+    """Dispatch wrapper.  source ∈ {iem, synoptic, metar_substitute}.
+    Falls back to IEM on Synoptic / METAR-substitute failure."""
     if source == "synoptic":
         if not synoptic_token:
             logger.warning("ASOS source=synoptic but no token; falling back to IEM")
@@ -260,6 +312,20 @@ def fetch_live_asos(station: str, *, source: str = "iem",
         except Exception:
             logger.exception("Synoptic ASOS failed; falling back to IEM")
             return fetch_live_asos_iem(station, hours_back=hours_back, data_dir=data_dir)
+
+    if source == "metar_substitute":
+        try:
+            # Pull enough METAR obs to cover hours_back: ~12 obs/h × hours_back, capped at 500
+            limit = min(500, max(40, int(hours_back * 12)))
+            df = fetch_metar_as_asos(station, limit=limit, data_dir=data_dir)
+            if df.empty:
+                logger.warning("METAR-substitute returned empty; falling back to IEM")
+                return fetch_live_asos_iem(station, hours_back=hours_back, data_dir=data_dir)
+            return df
+        except Exception:
+            logger.exception("METAR-substitute failed; falling back to IEM")
+            return fetch_live_asos_iem(station, hours_back=hours_back, data_dir=data_dir)
+
     return fetch_live_asos_iem(station, hours_back=hours_back, data_dir=data_dir)
 
 

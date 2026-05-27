@@ -16,7 +16,7 @@ Both modes share:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -78,21 +78,33 @@ async def execute(
             skipped += 1
             continue
 
-        fill = await _execute_one(cfg, c, tgt, client)
+        # Target-vs-current diff. Strategy emits absolute targets ("hold 646 YES");
+        # execution only fills the delta. Without this, intraday refreshes compound
+        # positions on every cycle.
+        current = book.open_for(tgt.ticker, tgt.side)
+        current_qty = current.contracts if (current and not current.settled) else 0
+        delta_qty = tgt.target_contracts - current_qty
+        if delta_qty <= 0:
+            rows.append(_skip_row(cfg, run_utc, t_utc, prediction, c, tgt, reason="at_target"))
+            skipped += 1
+            continue
+        tgt_delta = replace(tgt, target_contracts=delta_qty)
+
+        fill = await _execute_one(cfg, c, tgt_delta, client)
         if fill is None:
-            rows.append(_skip_row(cfg, run_utc, t_utc, prediction, c, tgt, reason="rejected"))
+            rows.append(_skip_row(cfg, run_utc, t_utc, prediction, c, tgt_delta, reason="rejected"))
             skipped += 1
             continue
 
         book.add_fill(
-            ticker=c.ticker, side=tgt.side,
+            ticker=c.ticker, side=tgt_delta.side,
             contracts=fill["contracts"], fill_cents=fill["fill_price_cents"],
-            fee_cents=fill["fee_cents"], bucket_spec=tgt.bucket_spec,
+            fee_cents=fill["fee_cents"], bucket_spec=tgt_delta.bucket_spec,
             opened_utc=run_utc.isoformat(), anchor_date=str(prediction.date.date()),
         )
         fills += 1
         orders.append(fill)
-        rows.append(_filled_row(cfg, run_utc, t_utc, prediction, c, tgt, fill))
+        rows.append(_filled_row(cfg, run_utc, t_utc, prediction, c, tgt_delta, fill))
 
     if rows:
         append_rows(cfg.paths.live_log, rows)

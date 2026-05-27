@@ -43,8 +43,12 @@ kalshi:
   request_timeout_seconds: 15
 
 data:
-  # ASOS source: iem (24-48h lag, no key), synoptic (sub-minute, needs SYNOPTIC_TOKEN),
-  # or auto (use synoptic when token is set, else iem).
+  # ASOS source. Real-time options:
+  #   synoptic           sub-minute via Synoptic Mesonet (needs SYNOPTIC_TOKEN)
+  #   metar_substitute   real-time METAR (api.weather.gov) coerced into ASOS schema
+  # Lagged option:
+  #   iem                IEM 1-min ASOS, 24-48h lag (matches training, but blocks same-day anchor)
+  # auto = synoptic if token set, else metar_substitute.
   asos_source: auto
   synoptic_token_env: SYNOPTIC_TOKEN
   # Live-fetch windows (per source)

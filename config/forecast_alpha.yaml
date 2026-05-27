@@ -1,0 +1,56 @@
+# forecast_alpha — default configuration.
+# Override per-environment via $FORECAST_ALPHA_CONFIG=/path/to/custom.yaml.
+
+mode: paper                       # paper | live  (LIVE requires Kalshi credentials)
+station: KMDW
+local_tz: America/Chicago
+
+paths:
+  data_dir: data
+  model_dir: data/model_v3_artifacts
+  live_log: data/live_log.parquet
+  positions_snapshot: data/positions.json
+  notebook_v3: notebooks/model_v3.ipynb
+  logs_dir: logs
+  kill_switch: data/KILL_SWITCH
+
+model:
+  name: v3
+  anchor_hour_local: 13           # T = 1 PM local
+
+strategy:
+  bankroll_usd: 1000.0            # paper bankroll; live mode queries Kalshi /portfolio
+  kelly_fraction: 0.25            # quarter-Kelly
+  kl_concentration_alpha: 1.0     # weight on KL contribution per bucket
+  edge_floor_cents: 1             # min net-of-fee edge to take a position
+  per_contract_max_pct: 0.20      # cap per-contract exposure (frac of bankroll)
+  total_exposure_max_pct: 0.60    # cap total exposure (frac of bankroll)
+  regime_throttle:
+    hrrr_persistence_gap_max_f: 8 # |HRRR_t2m_max - cli_yesterday| > N => halve sizing
+    confidence_floor_top1: 0.20   # top-1 bucket prob < N => halve sizing
+
+execution:
+  fill_model: ask                 # paper fill: ask | mid | bid
+  slippage_cents: 0
+  intraday_refresh_minutes: 60
+  market_event_pattern: KXHIGHCHI
+
+kalshi:
+  api_base: https://api.elections.kalshi.com/trade-api/v2
+  key_id_env: KALSHI_KEY_ID
+  private_key_path_env: KALSHI_PRIVATE_KEY_PATH
+  rest_poll_seconds: 30
+  request_timeout_seconds: 15
+
+scheduler:
+  anchor_grace_minutes: 5         # wait N minutes past anchor before reading features
+  data_refresh_minutes: 15
+  predict_lookback_hours: 2       # how far back to consider running an anchor if missed
+
+risk:
+  daily_max_loss_usd: 100.0       # tripping this halts new entries for the rest of the day
+  per_anchor_max_trades: 6        # never more than the natural 6-contract count
+
+ui:
+  refresh_hz: 4
+  theme: dark

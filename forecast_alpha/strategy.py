@@ -255,6 +255,196 @@ def _kelly_fraction(p_win: float, cost_dollars: float) -> float:
     return max(0.0, (p_win * b - q_lose) / b)
 
 
+def run_two_bucket_arbitrage(
+    cfg: StrategyCfg,
+    prediction: Prediction,
+    contracts: list[KalshiContract],
+    feature_row: pd.Series | None,
+    bankroll_usd: float,
+    *,
+    min_margin: float = 0.05,
+    fire_mode: str = "ev_gate",
+    base_rate: float = 0.739,
+    smooth_sigma: float = 0.0,
+    force_adjacency: bool = False,
+    p_model_override: dict[str, float] | None = None,
+) -> StrategyOutput:
+    """Two-bucket arbitrage on modal + second-modal.
+
+    Bets both buckets such that whichever of the two wins, net is positive.
+
+    fire_mode controls the gate:
+      "ev_gate" (default): fires when p_top2 > sum_asks + min_margin
+          → trusts the model's per-day claim of top-2 probability
+      "arb_only": fires whenever sum_asks < 1 (any arbitrage available),
+          uses base_rate (~74% historical top-2 hit rate) for Kelly sizing
+          → treats every arb opportunity as a play on the unconditional base rate
+
+    Sizing is equal-payout (X_i ∝ c_i) so the win dollar is identical regardless of
+    which of the two legs hits. Total stake is Kelly-sized.
+    """
+    live = [c for c in contracts if c.is_live]
+    if len(live) < 2:
+        return StrategyOutput(targets=[], diagnostics={"reason": "fewer than 2 live contracts"})
+
+    from forecast_alpha.pmf import bucket_lower_bound, bucket_prob, smooth_pmf
+
+    # Tier 1.3: optionally smooth the PMF before bucketing (kills quantile artifacts).
+    pmf_values = prediction.pmf.values
+    if smooth_sigma > 0:
+        pmf_values = smooth_pmf(pmf_values, sigma=smooth_sigma)
+
+    def p_for(c: KalshiContract) -> float:
+        if p_model_override is not None and c.ticker in p_model_override:
+            return float(p_model_override[c.ticker])
+        return bucket_prob(pmf_values, c.bucket_spec)
+
+    scored = sorted([(c, p_for(c)) for c in live], key=lambda x: -x[1])
+    modal_c, modal_p = scored[0]
+
+    if force_adjacency:
+        # Tier 1.2: pick rank-2 from buckets adjacent to modal in Kalshi-position order,
+        # not from raw PMF rank. Kills non-physical bimodal cases.
+        sorted_by_pos = sorted(live, key=lambda c: bucket_lower_bound(c.bucket_spec))
+        try:
+            modal_pos = sorted_by_pos.index(modal_c)
+        except ValueError:
+            modal_pos = 0
+        neighbors: list[tuple[KalshiContract, float]] = []
+        if modal_pos > 0:
+            n = sorted_by_pos[modal_pos - 1]
+            neighbors.append((n, p_for(n)))
+        if modal_pos < len(sorted_by_pos) - 1:
+            n = sorted_by_pos[modal_pos + 1]
+            neighbors.append((n, p_for(n)))
+        if not neighbors:
+            return StrategyOutput(targets=[], diagnostics={
+                "reason": "modal has no adjacent buckets in layout"})
+        neighbors.sort(key=lambda x: -x[1])
+        second_c, second_p = neighbors[0]
+    else:
+        second_c, second_p = scored[1]
+
+    c1 = modal_c.yes_ask
+    c2 = second_c.yes_ask
+    sum_asks = c1 + c2
+    p_top2 = modal_p + second_p
+
+    diag_base = {
+        "strategy":   "two_bucket_arbitrage",
+        "modal":      modal_c.bucket_spec,
+        "second":     second_c.bucket_spec,
+        "c1":         c1,
+        "c2":         c2,
+        "sum_asks":   sum_asks,
+        "modal_p":    modal_p,
+        "second_p":   second_p,
+        "p_top2":     p_top2,
+    }
+
+    if sum_asks >= 1.0:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"no arbitrage (sum_asks={sum_asks:.3f} >= 1)"})
+
+    if fire_mode == "ev_gate":
+        if p_top2 <= sum_asks + min_margin:
+            return StrategyOutput(targets=[], diagnostics={
+                **diag_base, "reason": f"EV margin too thin (need p_top2 > {sum_asks + min_margin:.3f}, got {p_top2:.3f})"})
+        p_used = p_top2
+    elif fire_mode == "arb_only":
+        # Trust the base rate regardless of per-day model claim. Still need sum_asks < base_rate
+        # for positive Kelly, else skip.
+        if base_rate <= sum_asks:
+            return StrategyOutput(targets=[], diagnostics={
+                **diag_base, "reason": f"sum_asks {sum_asks:.3f} >= base_rate {base_rate:.3f}"})
+        p_used = base_rate
+    else:
+        raise ValueError(f"unknown fire_mode: {fire_mode!r}")
+
+    throttle = _regime_throttle(cfg.regime_throttle, prediction, feature_row)
+    if throttle <= 0:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": "throttle zeroed"})
+
+    # Binary Kelly. Win-return = (1 - sum_asks)/sum_asks per dollar staked. Loss = -1.
+    b = (1.0 - sum_asks) / sum_asks
+    q = 1.0 - p_used
+    kelly_full = max(0.0, (b * p_used - q) / b)
+    f_stake = kelly_full * cfg.kelly_fraction * throttle
+    f_stake = min(f_stake, cfg.total_exposure_max_pct)
+    if f_stake <= 0:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"kelly <= 0 (kelly_full={kelly_full:.4f})", "throttle": throttle})
+
+    total_stake_usd = f_stake * bankroll_usd
+    K_usd = total_stake_usd / sum_asks               # equal payout target
+
+    # Per-leg stakes (dollars) and contract counts
+    X1 = K_usd * c1
+    X2 = K_usd * c2
+    n1 = max(0, int(X1 / c1))                        # = floor(K_usd) for both, equal payout
+    n2 = max(0, int(X2 / c2))
+
+    # Per-contract exposure cap
+    max_per_contract_usd = cfg.per_contract_max_pct * bankroll_usd
+    n1 = min(n1, int(max_per_contract_usd / c1))
+    n2 = min(n2, int(max_per_contract_usd / c2))
+    if n1 == 0 or n2 == 0:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": "size below 1 contract after caps", "throttle": throttle})
+
+    edge_per_stake_cents = (1.0 - sum_asks) * 100   # gross
+    targets = [
+        TargetPosition(
+            ticker=modal_c.ticker, side="yes",
+            target_contracts=n1, limit_price_cents=int(round(c1 * 100)),
+            bucket_spec=modal_c.bucket_spec,
+            rationale={
+                "role":           "modal",
+                "p_model":        float(modal_p),
+                "p_market":       float(c1),
+                "kelly_f":        float(kelly_full),
+                "scaled_kelly":   float(f_stake),
+                "exposure_frac":  float(n1 * c1 / max(bankroll_usd, 1e-9)),
+                "net_ev_cents":   float(edge_per_stake_cents),
+                "throttle":       float(throttle),
+            },
+        ),
+        TargetPosition(
+            ticker=second_c.ticker, side="yes",
+            target_contracts=n2, limit_price_cents=int(round(c2 * 100)),
+            bucket_spec=second_c.bucket_spec,
+            rationale={
+                "role":           "second_modal",
+                "p_model":        float(second_p),
+                "p_market":       float(c2),
+                "kelly_f":        float(kelly_full),
+                "scaled_kelly":   float(f_stake),
+                "exposure_frac":  float(n2 * c2 / max(bankroll_usd, 1e-9)),
+                "net_ev_cents":   float(edge_per_stake_cents),
+                "throttle":       float(throttle),
+            },
+        ),
+    ]
+    logger.info(
+        "two_bucket_arb: modal=%s@%.2f (p=%.2f), 2nd=%s@%.2f (p=%.2f); sum=%.3f p_top2=%.3f kelly=%.3f throttle=%.2f",
+        modal_c.bucket_spec, c1, modal_p, second_c.bucket_spec, c2, second_p,
+        sum_asks, p_top2, kelly_full, throttle,
+    )
+    return StrategyOutput(
+        targets=targets,
+        diagnostics={
+            **diag_base,
+            "kelly_full":    kelly_full,
+            "f_stake":       f_stake,
+            "throttle":      throttle,
+            "deployed_usd":  n1 * c1 + n2 * c2,
+            "K_payout_usd":  K_usd,
+            "edge_per_stake": (1.0 - sum_asks) / sum_asks,
+        },
+    )
+
+
 def _regime_throttle(throttle_cfg, prediction: Prediction,
                      feature_row: pd.Series | None) -> float:
     """Multiplier ∈ {1.0, 0.5, 0.25}. Halve once per active condition."""

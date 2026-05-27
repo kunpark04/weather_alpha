@@ -30,12 +30,17 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from forecast_alpha.calibration import (
+    CalibrationDay, build_override_lookup, leave_one_out_calibrate,
+)
 from forecast_alpha.config import load_config
 from forecast_alpha.fees import trade_fee_cents
 from forecast_alpha.kalshi import KalshiContract
 from forecast_alpha.model import Prediction, load_artifacts
-from forecast_alpha.pmf import INTEGER_F_GRID, parse_bucket, parse_kalshi_subtitle
-from forecast_alpha.strategy import run_strategy
+from forecast_alpha.pmf import (
+    INTEGER_F_GRID, bucket_prob, parse_bucket, parse_kalshi_subtitle, smooth_pmf,
+)
+from forecast_alpha.strategy import run_strategy, run_two_bucket_arbitrage
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +140,67 @@ def settle_position(bucket_spec: str, actual_f: int, side: str) -> bool:
 # Walk-forward loop
 # ---------------------------------------------------------------------------
 
+def collect_calibration_days(cfg, oof, kalshi, cli, start, end,
+                              assumed_spread_cents, smooth_sigma=0.0) -> list[CalibrationDay]:
+    """First pass: build CalibrationDay records for every date with full data.
+
+    For each date: bucket-level model probs (from possibly-smoothed PMF), market-
+    implied probs (yes_ask normalized), and which bucket actually won.
+    """
+    art = load_artifacts(cfg.paths.model_dir)
+    cli_truth = {pd.Timestamp(d).normalize(): int(v)
+                 for d, v in cli[["date", "max_temp_f"]].dropna().itertuples(index=False, name=None)}
+
+    days: list[CalibrationDay] = []
+    for i in range(len(oof["pmf"])):
+        date = pd.Timestamp(oof["feature_df"]["date"].iloc[i]).normalize()
+        if (start and date < start) or (end and date > end):
+            continue
+        if date not in cli_truth:
+            continue
+        anchor_t_local = date.tz_localize(cfg.local_tz) + pd.Timedelta(hours=cfg.model.anchor_hour_local)
+        anchor_t_utc = anchor_t_local.tz_convert("UTC")
+        contracts = snapshot_at_anchor(kalshi, date, anchor_t_utc, assumed_spread_cents)
+        if len(contracts) < 2:
+            continue
+
+        pmf_vals = oof["pmf"][i]
+        if smooth_sigma > 0:
+            pmf_vals = smooth_pmf(pmf_vals, sigma=smooth_sigma)
+
+        m_probs = np.array([bucket_prob(pmf_vals, c.bucket_spec) for c in contracts])
+        # Market implied probs: yes_ask normalized to sum 1 across the 6 contracts.
+        asks = np.array([c.yes_ask for c in contracts])
+        market_probs = asks / asks.sum() if asks.sum() > 0 else np.full_like(asks, 1.0 / len(asks))
+
+        # Outcome bucket index
+        actual_f = cli_truth[date]
+        outcome_idx = -1
+        for j, c in enumerate(contracts):
+            pred, _ = parse_bucket(c.bucket_spec)
+            if pred(actual_f):
+                outcome_idx = j
+                break
+
+        days.append(CalibrationDay(
+            date=date,
+            tickers=[c.ticker for c in contracts],
+            model_probs=m_probs,
+            market_probs=market_probs,
+            outcome_idx=outcome_idx,
+        ))
+    return days
+
+
 def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
-             starting_bankroll: float | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+             starting_bankroll: float | None = None,
+             strategy_name: str = "joint_kelly",
+             min_margin: float = 0.05,
+             fire_mode: str = "ev_gate",
+             base_rate: float = 0.739,
+             smooth_sigma: float = 0.0,
+             force_adjacency: bool = False,
+             override_lookup: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     art = load_artifacts(cfg.paths.model_dir)
     cli_truth = {pd.Timestamp(d).normalize(): int(v)
                  for d, v in cli[["date", "max_temp_f"]].dropna().itertuples(index=False, name=None)}
@@ -160,8 +224,10 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
         if not contracts:
             continue
 
-        # Reconstruct Prediction from OOF PMF
+        # Reconstruct Prediction from OOF PMF (apply smoothing if requested).
         pmf_values = oof["pmf"][i]
+        if smooth_sigma > 0:
+            pmf_values = smooth_pmf(pmf_values, sigma=smooth_sigma)
         cdf = np.cumsum(pmf_values)
         pmf_series = pd.Series(pmf_values, index=art.integer_f_grid, name="P")
         pred = Prediction(
@@ -175,7 +241,17 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
         )
 
         feature_row = oof["feature_df"].iloc[i]
-        strat_out = run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
+        if strategy_name == "two_bucket_arb":
+            override = override_lookup.get(date) if override_lookup else None
+            strat_out = run_two_bucket_arbitrage(
+                cfg.strategy, pred, contracts, feature_row, bankroll,
+                min_margin=min_margin, fire_mode=fire_mode, base_rate=base_rate,
+                smooth_sigma=0.0,                   # already smoothed pmf_values above
+                force_adjacency=force_adjacency,
+                p_model_override=override,
+            )
+        else:
+            strat_out = run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
 
         if date not in cli_truth:
             continue
@@ -319,6 +395,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--end",   type=pd.Timestamp, default=None)
     ap.add_argument("--assumed-spread-cents", type=int, default=2,
                     help="half-spread added to trade-price to approximate ask (default 2¢)")
+    ap.add_argument("--strategy", choices=["joint_kelly", "two_bucket_arb"],
+                    default="joint_kelly", help="which strategy module to backtest")
+    ap.add_argument("--min-margin", type=float, default=0.05,
+                    help="(two_bucket_arb ev_gate) minimum EV margin p_top2 - sum_asks before firing")
+    ap.add_argument("--fire-mode", choices=["ev_gate", "arb_only"], default="ev_gate",
+                    help="(two_bucket_arb) ev_gate uses model EV; arb_only uses base_rate")
+    ap.add_argument("--base-rate", type=float, default=0.739,
+                    help="(two_bucket_arb arb_only) assumed top-2 hit rate (default 0.739 = OOF historical)")
+    ap.add_argument("--smooth-sigma", type=float, default=0.0,
+                    help="Tier 1.3: Gaussian-smooth PMF with this sigma (°F). Default 0 = off.")
+    ap.add_argument("--force-adjacency", action="store_true",
+                    help="Tier 1.2: pick 2nd modal from buckets adjacent to modal, not raw PMF rank.")
+    ap.add_argument("--calibrate-to-market", action="store_true",
+                    help="Tier 1.1: LOO-fit shrinkage between model and market-implied bucket probs.")
     ap.add_argument("--out", default="data/backtest_results.parquet")
     args = ap.parse_args(argv)
 
@@ -328,8 +418,30 @@ def main(argv: list[str] | None = None) -> int:
     cli = pd.read_parquet(cfg.paths.data_dir / f"cli_{cfg.station}.parquet")
     cli["date"] = pd.to_datetime(cli["date"])
 
+    override_lookup = None
+    if args.calibrate_to_market:
+        print("\n=== Tier 1.1: building LOO market-calibration lookup ===")
+        cal_days = collect_calibration_days(cfg, oof, kalshi, cli, args.start, args.end,
+                                             args.assumed_spread_cents, args.smooth_sigma)
+        print(f"  collected {len(cal_days)} calibration days")
+        calibrated, alphas = leave_one_out_calibrate(cal_days)
+        override_lookup = build_override_lookup(cal_days, calibrated)
+        print(f"  per-day alpha: mean={np.mean(alphas):.3f}, median={np.median(alphas):.3f}, "
+              f"min={np.min(alphas):.3f}, max={np.max(alphas):.3f}")
+
     df, positions = backtest(cfg, oof, kalshi, cli, args.start, args.end,
-                              args.assumed_spread_cents)
+                              args.assumed_spread_cents,
+                              strategy_name=args.strategy,
+                              min_margin=args.min_margin,
+                              fire_mode=args.fire_mode,
+                              base_rate=args.base_rate,
+                              smooth_sigma=args.smooth_sigma,
+                              force_adjacency=args.force_adjacency,
+                              override_lookup=override_lookup)
+    print(f"\nstrategy:  {args.strategy}  fire_mode={args.fire_mode}  "
+          f"min_margin={args.min_margin}  base_rate={args.base_rate}  "
+          f"smooth_sigma={args.smooth_sigma}  force_adjacency={args.force_adjacency}  "
+          f"calibrate={args.calibrate_to_market}")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

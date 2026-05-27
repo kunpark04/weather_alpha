@@ -17,6 +17,40 @@ import pandas as pd
 INTEGER_F_GRID = np.arange(-30, 131, dtype=int)
 
 
+def smooth_pmf(values: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    """Gaussian-smooth a PMF, renormalize. sigma is in °F units (grid is integer °F)."""
+    if sigma <= 0:
+        return values
+    from scipy.ndimage import gaussian_filter1d
+    smoothed = gaussian_filter1d(values, sigma=float(sigma), mode="nearest")
+    total = smoothed.sum()
+    return smoothed / total if total > 0 else smoothed
+
+
+def bucket_lower_bound(spec) -> float:
+    """Numeric lower bound for ordering Kalshi bucket specs. Open-ended specs
+    return ±inf so they sort to the extremes."""
+    s = str(spec).strip()
+    if s.startswith("<="):
+        return -float("inf")
+    if s.startswith("<"):
+        return -float("inf")
+    if s.startswith(">="):
+        return float(s[2:])
+    if s.startswith(">"):
+        return float(s[1:])
+    if "-" in s and not s.startswith("-"):
+        parts = s.split("-")
+        try:
+            return float(parts[0])
+        except ValueError:
+            return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
 # ---------------------------------------------------------------------------
 # Quantile → integer-°F PMF (Chernozhukov rearrangement + piecewise-linear CDF)
 # ---------------------------------------------------------------------------

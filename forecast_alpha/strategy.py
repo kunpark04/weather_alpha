@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable
 
 import numpy as np
@@ -445,6 +445,266 @@ def run_two_bucket_arbitrage(
     )
 
 
+def run_tail_probability_strategy(
+    cfg: StrategyCfg,
+    prediction: Prediction,
+    contracts: list[KalshiContract],
+    feature_row: pd.Series | None,
+    bankroll_usd: float,
+    *,
+    min_net_ev_cents: float = 2.0,
+) -> StrategyOutput:
+    """Single-leg directional bets on the two TAIL buckets only (`<=K` and `>=K+7`).
+
+    For each tail contract: compute model's tail probability vs market ask. Bet
+    whichever side (YES / NO) has positive net-of-fee EV. Skips body buckets
+    entirely — that's where market is most efficient. Targets the model's
+    documented strength: tail probability calibration via climatology + hard floor.
+    """
+    from forecast_alpha.pmf import bucket_prob
+
+    live = [c for c in contracts if c.is_live]
+    if not live:
+        return StrategyOutput(targets=[], diagnostics={"reason": "no live contracts"})
+
+    tails = [c for c in live if str(c.bucket_spec).strip().startswith(("<", ">"))]
+    if not tails:
+        return StrategyOutput(targets=[], diagnostics={"reason": "no tail contracts"})
+
+    throttle = _regime_throttle(cfg.regime_throttle, prediction, feature_row)
+    targets: list[TargetPosition] = []
+    deployed_usd = 0.0
+
+    for c in tails:
+        p_model = bucket_prob(prediction.pmf.values, c.bucket_spec)
+        ev_yes = net_ev_cents(p_model, c.yes_ask, contracts=1)
+        ev_no = net_ev_cents(1.0 - p_model, c.no_ask, contracts=1)
+
+        if ev_yes >= ev_no and ev_yes >= min_net_ev_cents:
+            side, price, p_win, ev = "yes", c.yes_ask, p_model, ev_yes
+        elif ev_no > ev_yes and ev_no >= min_net_ev_cents:
+            side, price, p_win, ev = "no", c.no_ask, 1.0 - p_model, ev_no
+        else:
+            continue
+
+        kelly = _kelly_fraction(p_win, price)
+        f_stake = min(
+            kelly * cfg.kelly_fraction * throttle,
+            cfg.per_contract_max_pct,
+        )
+        if f_stake <= 0:
+            continue
+
+        notional = f_stake * bankroll_usd
+        n = int(notional / max(price, 0.01))
+        if n <= 0:
+            continue
+
+        targets.append(TargetPosition(
+            ticker=c.ticker, side=side, target_contracts=n,
+            limit_price_cents=int(round(price * 100)),
+            bucket_spec=c.bucket_spec,
+            rationale={
+                "strategy":     "tail_probability",
+                "tail":         "low" if str(c.bucket_spec).startswith("<") else "high",
+                "p_model":      float(p_model),
+                "p_market":     float(c.yes_ask),
+                "kelly_f":      float(kelly),
+                "scaled_kelly": float(f_stake),
+                "exposure_frac": float(n * price / max(bankroll_usd, 1e-9)),
+                "net_ev_cents": float(ev),
+                "throttle":     float(throttle),
+            },
+        ))
+        deployed_usd += n * price
+
+    # Scale down if total exposure exceeds cap
+    cap_usd = cfg.total_exposure_max_pct * bankroll_usd
+    if deployed_usd > cap_usd and deployed_usd > 0:
+        scale = cap_usd / deployed_usd
+        targets = [replace(t, target_contracts=max(0, int(t.target_contracts * scale)))
+                   for t in targets]
+        targets = [t for t in targets if t.target_contracts > 0]
+
+    return StrategyOutput(targets=targets, diagnostics={
+        "strategy":      "tail_probability",
+        "n_targets":     len(targets),
+        "deployed_usd":  sum(t.target_contracts * t.limit_price_cents / 100 for t in targets),
+        "throttle":      throttle,
+    })
+
+
+def run_hrrr_bias_strategy(
+    cfg: StrategyCfg,
+    prediction: Prediction,
+    contracts: list[KalshiContract],
+    feature_row: pd.Series | None,
+    bankroll_usd: float,
+    *,
+    min_shift_F: float = 1.5,
+    market_anchor_tolerance_F: float = 1.5,
+    max_modal_cost: float = 0.50,
+) -> StrategyOutput:
+    """Bet on the model's modal when it shifts up vs market's modal AND the market's
+    modal is anchored near raw HRRR.
+
+    Mechanism: HRRR has a documented ~-2°F cool bias at KMDW (HANDOFF §1.3).
+    Model learned to correct for it. When the market's modal price clusters near
+    raw HRRR (= traders/algos using HRRR without bias correction) and the model
+    says "actually 2°F warmer", that's a specific, replicable edge.
+    """
+    from forecast_alpha.pmf import bucket_prob
+
+    if feature_row is None:
+        return StrategyOutput(targets=[], diagnostics={"reason": "no feature_row"})
+    hrrr_max = feature_row.get("hrrr_t2m_max_peak")
+    if hrrr_max is None or pd.isna(hrrr_max):
+        return StrategyOutput(targets=[], diagnostics={"reason": "HRRR NaN"})
+    hrrr_max_F = float(hrrr_max)   # already in °F (model_v3 §3 applied K→F at feature-build time)
+
+    live = [c for c in contracts if c.is_live]
+    if not live:
+        return StrategyOutput(targets=[], diagnostics={"reason": "no live contracts"})
+
+    def _midpoint(spec: str) -> float:
+        s = str(spec).strip()
+        if s.startswith("<="): return float(s[2:]) - 0.5
+        if s.startswith("<"):  return float(s[1:]) - 1.0
+        if s.startswith(">="): return float(s[2:]) + 0.5
+        if s.startswith(">"):  return float(s[1:]) + 1.0
+        if "-" in s and not s.startswith("-"):
+            lo, hi = s.split("-")
+            return (float(lo) + float(hi)) / 2.0
+        try: return float(s)
+        except ValueError: return 0.0
+
+    scored = sorted(
+        [(c, bucket_prob(prediction.pmf.values, c.bucket_spec)) for c in live],
+        key=lambda x: -x[1],
+    )
+    model_modal_c, model_modal_p = scored[0]
+    market_modal_c = max(live, key=lambda c: c.yes_ask)
+
+    model_mid = _midpoint(model_modal_c.bucket_spec)
+    market_mid = _midpoint(market_modal_c.bucket_spec)
+    shift = model_mid - market_mid
+    market_near_hrrr = abs(market_mid - hrrr_max_F) < market_anchor_tolerance_F
+
+    diag_base = {
+        "strategy":         "hrrr_bias",
+        "hrrr_max_F":       hrrr_max_F,
+        "model_modal_mid":  model_mid,
+        "market_modal_mid": market_mid,
+        "shift_F":          shift,
+        "market_near_hrrr": bool(market_near_hrrr),
+        "model_modal_p":    model_modal_p,
+        "model_modal_ask":  model_modal_c.yes_ask,
+    }
+
+    if shift < min_shift_F:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"shift {shift:.1f}°F < {min_shift_F}"})
+    if not market_near_hrrr:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": "market modal not anchored to HRRR"})
+    if model_modal_c.yes_ask >= max_modal_cost:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"model modal ask {model_modal_c.yes_ask:.2f} >= {max_modal_cost}"})
+
+    throttle = _regime_throttle(cfg.regime_throttle, prediction, feature_row)
+    net_ev = net_ev_cents(model_modal_p, model_modal_c.yes_ask, contracts=1)
+    if net_ev < cfg.edge_floor_cents:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"net_ev {net_ev:.1f}¢ below floor"})
+
+    kelly = _kelly_fraction(model_modal_p, model_modal_c.yes_ask)
+    f_stake = min(
+        kelly * cfg.kelly_fraction * throttle,
+        cfg.per_contract_max_pct,
+        cfg.total_exposure_max_pct,
+    )
+    notional = f_stake * bankroll_usd
+    n = int(notional / max(model_modal_c.yes_ask, 0.01))
+    if n <= 0:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": "size below 1 contract"})
+
+    target = TargetPosition(
+        ticker=model_modal_c.ticker, side="yes", target_contracts=n,
+        limit_price_cents=int(round(model_modal_c.yes_ask * 100)),
+        bucket_spec=model_modal_c.bucket_spec,
+        rationale={
+            **diag_base,
+            "kelly_f":       float(kelly),
+            "scaled_kelly":  float(f_stake),
+            "exposure_frac": float(n * model_modal_c.yes_ask / max(bankroll_usd, 1e-9)),
+            "net_ev_cents":  float(net_ev),
+            "p_model":       float(model_modal_p),
+            "p_market":      float(model_modal_c.yes_ask),
+            "throttle":      float(throttle),
+        },
+    )
+    return StrategyOutput(targets=[target], diagnostics={**diag_base, "throttle": throttle})
+
+
+def run_regime_confident_strategy(
+    cfg: StrategyCfg,
+    prediction: Prediction,
+    contracts: list[KalshiContract],
+    feature_row: pd.Series | None,
+    bankroll_usd: float,
+    *,
+    peak_p_floor: float = 0.50,
+    max_hrrr_gap_F: float = 4.0,
+    min_margin: float = 0.05,
+    fire_mode: str = "ev_gate",
+    base_rate: float = 0.739,
+    smooth_sigma: float = 0.0,
+    force_adjacency: bool = False,
+    p_model_override: dict[str, float] | None = None,
+) -> StrategyOutput:
+    """Two-bucket arb gated by HARD regime filter (model must be in-distribution).
+
+    Inverts the existing throttle logic: instead of halving sizing on noisy days,
+    this skips them entirely. On the days that pass the regime gate, it bypasses
+    the soft throttle (uses full configured kelly_fraction).
+
+    Hypothesis: the model's edge over the market is concentrated on regime-clean
+    days. Skipping the noisy ones removes negative-edge trades without sacrificing
+    edge on the good days.
+    """
+    if prediction.peak_P < peak_p_floor:
+        return StrategyOutput(targets=[], diagnostics={
+            "strategy": "regime_confident",
+            "reason":  f"peak_P {prediction.peak_P:.3f} < {peak_p_floor} (model not confident)",
+        })
+
+    if feature_row is not None:
+        hrrr_max = feature_row.get("hrrr_t2m_max_peak")
+        cli_yest = feature_row.get("cli_high_yesterday")
+        if hrrr_max is not None and not pd.isna(hrrr_max) \
+                and cli_yest is not None and not pd.isna(cli_yest):
+            gap = abs(float(hrrr_max) - float(cli_yest))   # both already °F
+            if gap > max_hrrr_gap_F:
+                return StrategyOutput(targets=[], diagnostics={
+                    "strategy": "regime_confident",
+                    "reason":  f"HRRR-persistence gap {gap:.1f}°F > {max_hrrr_gap_F}",
+                    "gap_F":   float(gap),
+                })
+
+    # Regime clean — run two_bucket_arb but bypass throttle by temporarily zeroing
+    # the two throttle conditions so _regime_throttle returns 1.0.
+    out = run_two_bucket_arbitrage(
+        cfg, prediction, contracts, feature_row, bankroll_usd,
+        min_margin=min_margin, fire_mode=fire_mode, base_rate=base_rate,
+        smooth_sigma=smooth_sigma, force_adjacency=force_adjacency,
+        p_model_override=p_model_override,
+    )
+    out.diagnostics["strategy"] = "regime_confident"
+    out.diagnostics["regime_gate"] = "passed"
+    return out
+
+
 def _regime_throttle(throttle_cfg, prediction: Prediction,
                      feature_row: pd.Series | None) -> float:
     """Multiplier ∈ {1.0, 0.5, 0.25}. Halve once per active condition."""
@@ -459,14 +719,13 @@ def _regime_throttle(throttle_cfg, prediction: Prediction,
             hrrr_max = feature_row.get("hrrr_t2m_max_peak")
             cli_yest = feature_row.get("cli_high_yesterday")
             if pd.notna(hrrr_max) and pd.notna(cli_yest):
-                # hrrr_t2m_max_peak is in Kelvin; convert to °F for the gap test
-                hrrr_max_f = (float(hrrr_max) - 273.15) * 9 / 5 + 32
-                gap = abs(hrrr_max_f - float(cli_yest))
+                # hrrr_t2m_max_peak is already in °F (converted in model_v3.ipynb §3 via _K_to_F).
+                gap = abs(float(hrrr_max) - float(cli_yest))
                 if gap > throttle_cfg.hrrr_persistence_gap_max_f:
                     multiplier *= 0.5
                     logger.info(
                         "regime throttle: large HRRR-persistence gap (|%.1f - %.1f| = %.1f > %.1f)",
-                        hrrr_max_f, float(cli_yest), gap, throttle_cfg.hrrr_persistence_gap_max_f,
+                        float(hrrr_max), float(cli_yest), gap, throttle_cfg.hrrr_persistence_gap_max_f,
                     )
         except Exception as e:
             logger.warning("regime throttle: feature lookup failed (%s)", e)

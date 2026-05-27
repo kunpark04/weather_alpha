@@ -40,7 +40,13 @@ from forecast_alpha.model import Prediction, load_artifacts
 from forecast_alpha.pmf import (
     INTEGER_F_GRID, bucket_prob, parse_bucket, parse_kalshi_subtitle, smooth_pmf,
 )
-from forecast_alpha.strategy import run_strategy, run_two_bucket_arbitrage
+from forecast_alpha.strategy import (
+    run_hrrr_bias_strategy,
+    run_regime_confident_strategy,
+    run_strategy,
+    run_tail_probability_strategy,
+    run_two_bucket_arbitrage,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -241,13 +247,27 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
         )
 
         feature_row = oof["feature_df"].iloc[i]
+        override = override_lookup.get(date) if override_lookup else None
         if strategy_name == "two_bucket_arb":
-            override = override_lookup.get(date) if override_lookup else None
             strat_out = run_two_bucket_arbitrage(
                 cfg.strategy, pred, contracts, feature_row, bankroll,
                 min_margin=min_margin, fire_mode=fire_mode, base_rate=base_rate,
-                smooth_sigma=0.0,                   # already smoothed pmf_values above
-                force_adjacency=force_adjacency,
+                smooth_sigma=0.0, force_adjacency=force_adjacency,
+                p_model_override=override,
+            )
+        elif strategy_name == "tail":
+            strat_out = run_tail_probability_strategy(
+                cfg.strategy, pred, contracts, feature_row, bankroll,
+            )
+        elif strategy_name == "hrrr_bias":
+            strat_out = run_hrrr_bias_strategy(
+                cfg.strategy, pred, contracts, feature_row, bankroll,
+            )
+        elif strategy_name == "regime_confident":
+            strat_out = run_regime_confident_strategy(
+                cfg.strategy, pred, contracts, feature_row, bankroll,
+                min_margin=min_margin, fire_mode=fire_mode, base_rate=base_rate,
+                smooth_sigma=0.0, force_adjacency=force_adjacency,
                 p_model_override=override,
             )
         else:
@@ -395,7 +415,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--end",   type=pd.Timestamp, default=None)
     ap.add_argument("--assumed-spread-cents", type=int, default=2,
                     help="half-spread added to trade-price to approximate ask (default 2¢)")
-    ap.add_argument("--strategy", choices=["joint_kelly", "two_bucket_arb"],
+    ap.add_argument("--strategy",
+                    choices=["joint_kelly", "two_bucket_arb", "tail", "hrrr_bias", "regime_confident"],
                     default="joint_kelly", help="which strategy module to backtest")
     ap.add_argument("--min-margin", type=float, default=0.05,
                     help="(two_bucket_arb ev_gate) minimum EV margin p_top2 - sum_asks before firing")

@@ -77,6 +77,39 @@ bucket structure for edge computation. **Currently in paper-trading mode.**
 - **`drop_lower_ask` transform**: keep modal + the higher-ask of the two adjacents. The market is empirically 82% accurate at picking which adjacent to bet on (confirmed by placebo: `drop_higher_ask` loses $431 in the opposite direction).
 - **Equal-payout sizing**: `stake_i = K × ask_i` so payout on any winning leg = K dollars regardless of which won.
 
+### 1.4 Midnight anchor (v4 model) — tested 2026-05-28, NOT viable
+
+Tested whether the wing edge survives at a **midnight forecast anchor** (model
+`v4`, midnight market snapshot) instead of 1 PM. It does not — on either axis.
+
+**Model side (v4 midnight OOF):** far weaker than v3 at bucket prediction.
+
+| Metric | v3 (1 PM) | v4 (midnight) |
+|---|---|---|
+| §10.2 fixed-2°F Top-1 / Top-3 (5-yr OOF) | 45.8% / 87.8% | 19.1% / 48.7% |
+| Kalshi-resolution model Top-1 / Top-3 | 44.3% / 91.8% | 15.2% / 27.3% |
+| Agreement with market modal | ~56% | ~15–18% |
+
+Even at **equal information** (both at midnight), the market beats v4 decisively
+(market Top-3 90.9% vs v4 27.3%). The market's edge is an intraday-information
+effect: its Top-1 sharpens 40.9% (midnight) → 62–64% (1 PM) and its 2-leg
+coverage 69.7% → 95.5%. At midnight the book is still diffuse.
+
+**Strategy side:** both top-2 strategies flip to losing on the midnight anchor
+(identical params; only model→v4, anchor→0):
+
+| Strategy | 1 PM (v3) | midnight (v4) |
+|---|---|---|
+| `wing + drop_lower_ask` | +$308 (20/2) | **−$125** (7/2, 9 fires) |
+| `market_wing + drop_lower_ask` | +$371 (35/5) | **−$388** (43/20) |
+
+`wing` fires rarely (9 days — v4 rarely agrees with the market) and over-bets
+(it carries `assumed_win_prob=0.99`, true at 1 PM where the wing settles 94–100%
+but false at midnight where it settles ~83%). `market_wing` fires often but the
+diffuse midnight book means a 2-leg wing covers only ~70% at ~the same cost →
+68% WR, −71% max DD. **Conclusion: the edge lives in the 1 PM information
+environment; the midnight anchor is not tradeable.** Repro scripts in §6.
+
 ---
 
 ## 2. Sizing & risk pipeline
@@ -194,6 +227,10 @@ Expected: 22 fires, +$308 PnL, 20/2 W/L. Positions land in `data/prod_backtest_p
 - `scripts/sizing_breakdown.py` — per-day stake decomposition
 - `scripts/verify_bucket_accuracy.py` — §10.2 verification + §10.3 computation
 - `scripts/full_67day_backtest.py` — filtered vs unfiltered comparison on full Kalshi window
+- `scripts/v3_v4_kalshi_compare.py` — v3-vs-v4 model & market accuracy at Kalshi resolution, both anchors (§1.4)
+- `scripts/wing_settlement.py` — 1/2/3-leg wing settlement % by model & anchor hour (§1.4)
+- `scripts/market_modal_coverage.py` — market top-1/2/3 modal coverage, midnight vs 1 PM (§1.4)
+- `scripts/backtest_strategy.py --model-dir <dir> --anchor-hour-local <H>` — backtest any model dir at any anchor hour; OOF-only mode if the dir lacks deployable artifacts
 
 ---
 

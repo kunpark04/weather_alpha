@@ -20,7 +20,7 @@ from forecast_alpha.features import build_features
 from forecast_alpha.kalshi import KalshiClient
 from forecast_alpha.model import ModelArtifacts, Prediction, predict_for_anchor
 from forecast_alpha.positions import Book
-from forecast_alpha.strategy import StrategyOutput, run_strategy
+from forecast_alpha.strategy import StrategyOutput, run_strategy, run_wing_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ async def run_cycle(
                   if (fb.feature_df["date"] == anchor).any() else None
 
     bankroll = _current_bankroll(cfg, book)
-    strat = run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
+    strat = _dispatch_strategy(cfg, pred, contracts, feature_row, bankroll)
 
     exec_result = await execute(cfg, pred, contracts, strat, book, kalshi if cfg.is_live() else None)
 
@@ -109,6 +109,24 @@ async def run_cycle(
             "realized_pnl_cents": book.realized_pnl_cents,
         },
     )
+
+
+def _dispatch_strategy(cfg: Config, pred, contracts, feature_row, bankroll: float) -> StrategyOutput:
+    """Route to the configured strategy. Wing variants pull their knobs from cfg.strategy.wing."""
+    if cfg.strategy.name in ("wing", "wing_any", "market_wing"):
+        w = cfg.strategy.wing
+        return run_wing_strategy(
+            cfg.strategy, pred, contracts, feature_row, bankroll,
+            wing_anchor=w.anchor,
+            require_agreement=w.require_agreement,
+            drop_lower_ask=w.drop_lower_ask,
+            assumed_win_prob=w.assumed_win_prob,
+            max_ask_sum=w.max_ask_sum,
+            sizing_mode=w.sizing_mode,
+            flat_stake_usd=(w.flat_usd if w.flat_usd > 0 else None),
+            fee_aware=w.fee_aware,
+        )
+    return run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
 
 
 def _current_bankroll(cfg: Config, book: Book) -> float:

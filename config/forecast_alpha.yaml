@@ -19,8 +19,18 @@ model:
   anchor_hour_local: 13           # T = 1 PM local
 
 strategy:
-  bankroll_usd: 1000.0            # paper bankroll; live mode queries Kalshi /portfolio
-  kelly_fraction: 0.25            # quarter-Kelly
+  name: market_wing               # engine dispatch: market_wing | wing | wing_any | joint_kelly
+  bankroll_usd: 25.0              # real Kalshi account balance (starting)
+  kelly_fraction: 0.25            # quarter-Kelly (only used if a wing falls back to Kelly sizing)
+  wing:                           # wing knobs — see forecast_alpha/config.py:WingCfg
+    drop_lower_ask: true
+    require_agreement: false      # market_wing = market anchor, no agreement gate
+    anchor: market
+    assumed_win_prob: 0.92
+    max_ask_sum: 0.90             # tighter than 1.0: skip fee-dead high-cost days at $25
+    sizing_mode: equal_payout
+    flat_usd: 2.5                 # flat-$ total per trade (overrides Kelly); 0 = use Kelly
+    fee_aware: true
   kl_concentration_alpha: 1.0     # weight on KL contribution per bucket
   edge_floor_cents: 1             # min net-of-fee edge to take a position
   per_contract_max_pct: 0.20      # cap per-contract exposure (frac of bankroll)

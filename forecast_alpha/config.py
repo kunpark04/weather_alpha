@@ -42,6 +42,19 @@ class RegimeThrottle:
 
 
 @dataclass(frozen=True)
+class WingCfg:
+    """Wing-strategy selection knobs (used when StrategyCfg.name is a wing variant)."""
+    drop_lower_ask: bool = True
+    require_agreement: bool = False
+    anchor: str = "market"            # "model" | "market"
+    assumed_win_prob: float = 0.92
+    max_ask_sum: float = 0.90
+    sizing_mode: str = "equal_payout"
+    flat_usd: float = 2.5             # >0 = flat-$ total per trade (overrides Kelly); 0 = Kelly
+    fee_aware: bool = True            # skip a fire when fees would eat the whole win
+
+
+@dataclass(frozen=True)
 class StrategyCfg:
     bankroll_usd: float
     kelly_fraction: float
@@ -50,6 +63,8 @@ class StrategyCfg:
     per_contract_max_pct: float
     total_exposure_max_pct: float
     regime_throttle: RegimeThrottle
+    name: str = "joint_kelly"                       # engine dispatch target
+    wing: WingCfg = field(default_factory=WingCfg)
 
 
 @dataclass(frozen=True)
@@ -163,6 +178,7 @@ def load_config(path: Path | str | None = None) -> Config:
     )
     model = ModelCfg(**raw["model"])
     throttle = RegimeThrottle(**raw["strategy"]["regime_throttle"])
+    wing = WingCfg(**raw["strategy"].get("wing", {}))
     strategy = StrategyCfg(
         bankroll_usd=float(raw["strategy"]["bankroll_usd"]),
         kelly_fraction=float(raw["strategy"]["kelly_fraction"]),
@@ -171,6 +187,8 @@ def load_config(path: Path | str | None = None) -> Config:
         per_contract_max_pct=float(raw["strategy"]["per_contract_max_pct"]),
         total_exposure_max_pct=float(raw["strategy"]["total_exposure_max_pct"]),
         regime_throttle=throttle,
+        name=raw["strategy"].get("name", "joint_kelly"),
+        wing=wing,
     )
     execution = ExecutionCfg(**raw["execution"])
     kalshi = KalshiCfg(**raw["kalshi"])

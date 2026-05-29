@@ -462,6 +462,8 @@ def run_wing_strategy(
     drop_higher_ask: bool = False,
     market_signal_power: float = 3.0,
     wing_anchor: str = "model",
+    flat_stake_usd: float | None = None,
+    fee_aware: bool = False,
 ) -> StrategyOutput:
     """Wing strategy: cover modal + adjacents, optionally drop one adjacent.
 
@@ -594,19 +596,24 @@ def run_wing_strategy(
         return StrategyOutput(targets=[], diagnostics={
             **diag_base, "reason": "throttle zeroed"})
 
-    # Binary Kelly on the wing-or-miss bet (uses p_used, which may be base_rate)
-    b = (1.0 - sum_asks) / sum_asks
-    q = 1.0 - p_used
-    kelly_full = max(0.0, (b * p_used - q) / b)
-    f_stake = min(
-        kelly_full * cfg.kelly_fraction * throttle,
-        cfg.total_exposure_max_pct,
-    )
-    if f_stake <= 0:
-        return StrategyOutput(targets=[], diagnostics={
-            **diag_base, "reason": "kelly <= 0", "throttle": throttle})
+    # Sizing: flat-$ total (overrides Kelly) OR binary Kelly on the wing-or-miss bet.
+    if flat_stake_usd is not None and flat_stake_usd > 0:
+        total_stake_usd = min(float(flat_stake_usd), cfg.total_exposure_max_pct * bankroll_usd)
+        f_stake = total_stake_usd / max(bankroll_usd, 1e-9)
+        kelly_full = float("nan")                 # flat-sized, not Kelly (throttle bypassed)
+    else:
+        b = (1.0 - sum_asks) / sum_asks
+        q = 1.0 - p_used
+        kelly_full = max(0.0, (b * p_used - q) / b)
+        f_stake = min(
+            kelly_full * cfg.kelly_fraction * throttle,
+            cfg.total_exposure_max_pct,
+        )
+        if f_stake <= 0:
+            return StrategyOutput(targets=[], diagnostics={
+                **diag_base, "reason": "kelly <= 0", "throttle": throttle})
+        total_stake_usd = f_stake * bankroll_usd
 
-    total_stake_usd = f_stake * bankroll_usd
     K = total_stake_usd / sum_asks                # payout target per leg (equal-payout interpretation)
     max_per_contract_usd = cfg.per_contract_max_pct * bankroll_usd
 
@@ -655,6 +662,18 @@ def run_wing_strategy(
                 "ev_margin":     float(ev_margin),
             },
         ))
+
+    # Fee-aware gate (small accounts): skip if Kalshi fees would eat the entire win even
+    # on the best-case leg — i.e. the trade cannot profit on any outcome.
+    if fee_aware and targets:
+        from forecast_alpha.fees import trade_fee_cents
+        total_fee_c = sum(trade_fee_cents(t.limit_price_cents / 100.0, t.target_contracts) for t in targets)
+        total_cost_c = sum(t.target_contracts * t.limit_price_cents for t in targets)
+        best_win_payout_c = max(t.target_contracts for t in targets) * 100
+        if best_win_payout_c - total_cost_c - total_fee_c <= 0:
+            return StrategyOutput(targets=[], diagnostics={
+                **diag_base, "reason": "fee-aware: fees would eat the win",
+                "total_fee_cents": total_fee_c})
 
     min_legs = 2 if (drop_worst_leg or drop_lower_ask or drop_higher_ask) else 3
     if len(targets) < min_legs:

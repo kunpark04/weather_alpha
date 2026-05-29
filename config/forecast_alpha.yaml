@@ -17,6 +17,8 @@ paths:
 model:
   name: v3
   anchor_hour_local: 13           # T = 1 PM local
+  enabled: false                  # model-free: market_wing ignores the model -> skip weather/features/predict.
+                                  #   set true only for a model-anchored strategy (e.g. wing + agreement).
 
 strategy:
   name: market_wing               # engine dispatch: market_wing | wing | wing_any | joint_kelly

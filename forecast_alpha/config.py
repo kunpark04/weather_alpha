@@ -33,6 +33,7 @@ class Paths:
 class ModelCfg:
     name: str
     anchor_hour_local: int
+    enabled: bool = True              # False = model-free engine path (market-anchored strategies)
 
 
 @dataclass(frozen=True)

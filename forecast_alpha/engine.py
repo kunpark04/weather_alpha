@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from forecast_alpha.config import Config
@@ -65,25 +66,31 @@ async def run_cycle(
     skip_refresh: bool = False,
 ) -> CycleResult:
     """Run one anchor cycle: predict → strategize → execute → settle reconcile."""
-    if not skip_refresh:
-        await refresh_data(cfg, anchor_dt_local=force_anchor)
-
-    bundle = load_bundle(cfg.paths.data_dir, cfg.station)
-
-    anchor = force_anchor.normalize() if force_anchor is not None else \
-             latest_viable_anchor(bundle, art.t_hour_local, cfg.local_tz)
-    logger.info("cycle: anchor=%s mode=%s", anchor.date(), cfg.mode)
-
-    fb = build_features(bundle, art, anchor, cfg.paths.notebook_v3)
-    pred = predict_for_anchor(art, anchor, fb.feature_df)
-    logger.info("predicted %s: median=%d°F  80%% CI=[%d,%d]°F  peak=%d°F (P=%.3f)",
-                anchor.date(), pred.median, pred.lo10, pred.hi90, pred.peak_F, pred.peak_P)
+    if cfg.model.enabled:
+        if not skip_refresh:
+            await refresh_data(cfg, anchor_dt_local=force_anchor)
+        bundle = load_bundle(cfg.paths.data_dir, cfg.station)
+        anchor = force_anchor.normalize() if force_anchor is not None else \
+                 latest_viable_anchor(bundle, art.t_hour_local, cfg.local_tz)
+        fb = build_features(bundle, art, anchor, cfg.paths.notebook_v3)
+        pred = predict_for_anchor(art, anchor, fb.feature_df)
+        feature_row = fb.feature_df.loc[fb.feature_df["date"] == anchor].iloc[0] \
+                      if (fb.feature_df["date"] == anchor).any() else None
+        logger.info("cycle: anchor=%s mode=%s  median=%d°F  80%% CI=[%d,%d]°F  peak=%d°F (P=%.3f)",
+                    anchor.date(), cfg.mode, pred.median, pred.lo10, pred.hi90, pred.peak_F, pred.peak_P)
+    else:
+        # Model-free path: a market-anchored strategy (market_wing) ignores the model,
+        # so skip weather refresh / feature build / prediction entirely. CLI is still
+        # loaded for settlement reconciliation; the anchor is simply today's event date.
+        bundle = load_bundle(cfg.paths.data_dir, cfg.station)
+        local_today = pd.Timestamp.now(tz=cfg.local_tz).normalize().tz_localize(None)
+        anchor = force_anchor.normalize() if force_anchor is not None else local_today
+        pred = _placeholder_prediction(art, anchor)
+        feature_row = None
+        logger.info("cycle (model-free): anchor=%s mode=%s", anchor.date(), cfg.mode)
 
     contracts = await kalshi.fetch_event(anchor, cfg.execution.market_event_pattern)
     live = [c for c in contracts if c.is_live]
-
-    feature_row = fb.feature_df.loc[fb.feature_df["date"] == anchor].iloc[0] \
-                  if (fb.feature_df["date"] == anchor).any() else None
 
     bankroll = _current_bankroll(cfg, book)
     strat = _dispatch_strategy(cfg, pred, contracts, feature_row, bankroll)
@@ -108,6 +115,21 @@ async def run_cycle(
             "open_exposure_cents": book.exposure_cents(),
             "realized_pnl_cents": book.realized_pnl_cents,
         },
+    )
+
+
+def _placeholder_prediction(art: ModelArtifacts, anchor: pd.Timestamp) -> Prediction:
+    """No-information uniform PMF for the model-free path. market_wing ignores it for
+    decisions (anchor=market, p_used=assumed_win_prob); only diagnostics touch pred.pmf."""
+    grid = art.integer_f_grid
+    p = np.full(len(grid), 1.0 / len(grid))
+    return Prediction(
+        date=anchor, model=f"{art.name}/model-free",
+        pmf=pd.Series(p, index=grid, name="P"),
+        median=int(grid[len(grid) // 2]),
+        lo10=int(grid[len(grid) // 10]), hi90=int(grid[9 * len(grid) // 10]),
+        peak_F=int(grid[len(grid) // 2]), peak_P=float(p[0]),
+        season="NA", hard_floor=None, leaked_below_floor=0.0, nan_features=[],
     )
 
 

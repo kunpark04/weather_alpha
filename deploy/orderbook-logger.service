@@ -1,0 +1,27 @@
+# systemd unit for the always-on Kalshi orderbook logger.
+# Install on an ALWAYS-ON Linux host (cloud VM / Raspberry Pi) — NOT your laptop.
+#   sudo cp deploy/orderbook-logger.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now orderbook-logger
+#   journalctl -u orderbook-logger -f      # watch it live
+#
+# Restart=always  -> auto-restarts on any crash (this is the fix for "it stopped suddenly").
+# WantedBy=multi-user.target -> also starts automatically after a host reboot.
+
+[Unit]
+Description=Kalshi KXHIGHCHI orderbook logger (forecast-alpha)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fa
+WorkingDirectory=/opt/forecast-alpha
+ExecStart=/usr/bin/python3 /opt/forecast-alpha/scripts/orderbook_logger.py --interval 60 --out /opt/forecast-alpha/data/orderbook
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

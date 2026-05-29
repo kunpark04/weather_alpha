@@ -166,6 +166,7 @@ Every md file that governs how this project is worked on:
 | `notebooks/model_v4.ipynb` | Parallel R&D variant — midnight anchor (NOT production) |
 | `notebooks/live_predict.ipynb` | Live prediction pipeline (loads v3 artifacts) |
 | `config/forecast_alpha.yaml` | Persistent strategy/risk config |
+| [`deploy/README.md`](deploy/README.md) | Always-on deployment guide — orderbook-logger systemd unit + hosting options |
 
 Excluded from the index (auto-generated or vendored, no managerial role):
 `__pycache__/`, `archive/` (legacy notebooks/scripts), `logs/`, `data/*.parquet`.

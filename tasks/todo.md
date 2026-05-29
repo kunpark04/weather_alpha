@@ -23,21 +23,23 @@ Strategy chosen: **market_wing + drop_lower_ask**, **flat-$ sizing** (see memory
 - [x] Verified end-to-end @ $25: 24 fires, 96% WR, +$7.98 (+32%), −7% maxDD, $2.33 fees
 - note: Kelly-path "regression" was a false alarm (bankroll $1000→$25, uniform scaling), not a logic break
 
-## Phase 2 — Same-day anchor
-- [ ] Set `SYNOPTIC_TOKEN` (or accept `metar_substitute`)
-- [ ] Rework `latest_viable_anchor` to accept "today" from real-time sources (drop/relax IEM-lagged TAF+ASOS AND-gate)
-- [ ] Confirm merged ASOS parquet reaches today's 1 PM after a live refresh
+## Phase 2 — Model-free engine path — DONE, VERIFIED ✅ (replaced the old weather-anchor plan)
+- [x] Confirmed market_wing is model-free → same-day weather anchor (old P3 / Synoptic) is OBSOLETE
+- [x] `ModelCfg.enabled` flag; `run_cycle` skips refresh/features/predict; uniform placeholder PMF
+- [x] `_dispatch_strategy` routes config `strategy.name` → `run_wing_strategy`
+- [x] Verified end-to-end: model-free paper cycle on live KXHIGHCHI (6 contracts, no creds), correct skip on near-settled market
 
-## Phase 3 — Paper dry-run
-- [ ] Run wired bot in paper for a few days; confirm same-day prediction + would-be order
-- [ ] Eyeball Kalshi liquidity for a handful of contracts at the modal+adjacent
+## Phase 3 — Orderbook data logger — BUILT ✅ (deploy outstanding)
+- [x] `scripts/orderbook_logger.py`: keyless, resilient, all open events (handles 2-open), per-event-date folders, zip-on-settlement
+- [x] `deploy/orderbook-logger.service` + `deploy/README.md` (always-on VM/Pi)
+- [ ] DEPLOY: provision a free/cheap always-on host, `systemctl enable --now` (survives laptop shutdown)
 
-## Phase 4 — Go live (small)
-- [ ] Populate `.env`: `KALSHI_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH` (+ `SYNOPTIC_TOKEN`)
-- [ ] `mode: live`, `bankroll_usd: 25`, confirm KILL_SWITCH works
-- [ ] Dry-run `--headless --no-refresh` against a recent anchor; eyeball the order
+## Phase 4 — Go live (small, $25)
+- [ ] `.env`: `KALSHI_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH` (no weather/Synoptic token needed — model-free)
+- [ ] `mode: live` (bankroll_usd already 25); confirm KILL_SWITCH works
+- [ ] Run the engine at the 1 PM anchor on an always-on host (`main --loop` / TUI / cron)
 - [ ] First real trade; observe fill vs expected
 
 ## Phase 5 — Harden (deferred; low-$ impact at $25)
-- [ ] Poll `/portfolio/fills` + `/portfolio/balance`; replace limit=fill stub
+- [ ] Poll `/portfolio/fills` + `/portfolio/balance`; replace the limit=fill stub
 - [ ] Enforce `per_anchor_max_trades`; gate on open intraday exposure

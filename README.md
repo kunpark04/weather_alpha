@@ -13,9 +13,14 @@ trade. The whole bot is designed to run in an always-on terminal window.
 
 **Mode:** paper trading (Kalshi key not yet enabled for live).
 
+> **Production pivoted 2026-05-29 → `market_wing + drop_lower_ask`, flat-$ sizing, model-free.**
+> Wired into the engine and validated in paper (no model, no weather, no creds). On the real
+> **$25** account (flat $2.50, fee-aware): **24 fires, 96 % WR, +$7.98 (+32 %), −7 % DD**. The
+> table below is the *prior* Kelly-sized `wing` result; full rationale in [`HANDOFF.md`](HANDOFF.md) §1.5.
+
 | Item | Value |
 |---|---|
-| Production strategy | **`wing + drop_lower_ask`** (model anchor, agreement-required) |
+| Production strategy | **`market_wing + drop_lower_ask`**, flat-$, model-free *(pivoted 2026-05-29; table below = prior `wing`/Kelly result)* |
 | Backtest window | 2026-03-21 → 2026-05-26 (67 Kalshi days) |
 | Fires on | 22 of 67 days |
 | Win rate | **91 %** (20 / 2 day-level W/L) |
@@ -86,20 +91,29 @@ forecast-alpha/
 
 ---
 
-## Reproducing the production result
+## Reproducing the backtest
+
+The closest runnable backtest for the production `market_wing` (Kelly-sized — the
+harness does not yet expose flat-$ flags):
 
 ```powershell
 python scripts/backtest_strategy.py `
-    --strategy wing `
+    --strategy market_wing `
     --wing-drop-lower-ask `
-    --wing-assumed-win-prob 0.99 `
-    --wing-max-ask-sum 1.00 `
-    --out data/prod_backtest.parquet
+    --wing-assumed-win-prob 0.92 `
+    --wing-max-ask-sum 0.90 `
+    --out data/market_wing_backtest.parquet
 ```
 
-Expected: 22 fires, +$308 PnL, 20/2 W/L. Per-trade detail in
-`data/prod_backtest_positions.parquet`. Other reproducible scripts are listed
-in [`HANDOFF.md`](HANDOFF.md) §6.
+The **prior** production result (`wing` + Kelly): swap `--strategy wing
+--wing-assumed-win-prob 0.99 --wing-max-ask-sum 1.00` → 22 fires, +$308, 20/2 W/L.
+
+> ⚠️ The headline **+$7.98 / +32 % on $25** figure uses **flat-$ ($2.50) + fee-aware**
+> sizing, which lives only in `run_wing_strategy` / the engine config path
+> (`model.enabled: false`, `strategy.name: market_wing`, `wing.flat_usd: 2.5`) — **not**
+> in `backtest_strategy.py`. It was produced by an inline flat-$ analysis this session.
+> **TODO:** expose `--wing-flat-usd` / `--wing-fee-aware` in the backtest harness so the
+> production figure is reproducible from one command. Other scripts: [`HANDOFF.md`](HANDOFF.md) §6.
 
 ---
 
@@ -130,8 +144,8 @@ decisions.
 
 From [`HANDOFF.md`](HANDOFF.md) §7:
 
-1. Wire `wing + drop_lower_ask` into `engine.py` strategy dispatch (paper)
-2. Paper-mode liquidity verification — does Kalshi actually fill at `mid + 1¢`?
-3. Same-day live anchor (replace IEM ASOS with Synoptic Mesonet — ASOS-1min is the only blocker)
-4. Tail-risk mitigation — the "calm-day catastrophe" (1 per ~22 trades) isn't gated
-5. Confidence-floor variant — `model_modal_p >= 0.40` would have skipped the worst loss day
+1. ✅ **Strategy wired** — model-free `market_wing` + flat-$ dispatched from config (replaced `joint_kelly`)
+2. **Deploy the orderbook logger always-on** — `scripts/orderbook_logger.py` on a VM/Pi (`deploy/README.md`); keyless, survives reboots
+3. **Go live** — add Kalshi RSA creds (`KALSHI_KEY_ID` / `KALSHI_PRIVATE_KEY_PATH`) + `mode: live`, run the engine at the 1 PM anchor ($25)
+4. Expose flat-$ in `backtest_strategy.py` (`--wing-flat-usd` / `--wing-fee-aware`) so the production figure reproduces from one command
+5. Liquidity verification — the logger's depth ladders now answer "do we fill at `mid + 1¢`?"; fill reconciliation deferred (low-$ at $25)

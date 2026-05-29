@@ -1,6 +1,6 @@
 # Forecast Alpha — Handoff (KMDW / Kalshi KXHIGHCHI)
 
-_Last updated: 2026-05-28_
+_Last updated: 2026-05-29_
 
 Probabilistic ML model + production trading engine for **Kalshi KXHIGHCHI**
 (daily max temperature at **KMDW**, Chicago Midway). Model anchored at T = 1 PM
@@ -11,12 +11,18 @@ bucket structure for edge computation. **Currently in paper-trading mode.**
 
 ## 0. Current state at a glance
 
-> ### PRODUCTION STRATEGY (paper)
-> **`wing` + `drop_lower_ask`** (model anchor, agreement-required).
-> Backtest on 67 days of Kalshi history (2026-03-21 → 2026-05-26): fires on 22
-> days, 20/2 W/L (**91% win rate**), **+$308 PnL**, **Sharpe +2.85**, max DD -$181.
-> Placebo (drop_higher_ask) cleanly fails at -$431, confirming the directional
-> signal is real (not lottery).
+> ### PRODUCTION STRATEGY (paper) — pivoted 2026-05-29
+> **`market_wing` + `drop_lower_ask`, flat-$ sizing — MODEL-FREE.** Anchors on the
+> market modal (the v3 model is *not* used — see §1.5), keeps the higher-ask adjacent,
+> sizes a flat **$2.50/trade** on the real **$25** Kalshi account. Now wired into the
+> engine (config dispatch, replacing the old `joint_kelly` default) and validated
+> end-to-end in paper on live data. Backtest @ $25 (flat-$2.50, `max_ask_sum 0.90`,
+> fee-aware): **24 fires, 96% WR, +$7.98 (+32%), −7% max DD**.
+>
+> _Prior candidate (Kelly, model-anchored):_ `wing + drop_lower_ask` — +$308 / 91% /
+> Sharpe 2.85 / −12.5% on $1000. Higher Sharpe, but flat sizing brings market_wing's
+> drawdown to ~parity while keeping more fires, and market_wing needs no model →
+> far simpler live path. Sizing rationale + caveat: memory `project_sizing_flat_dollar`.
 
 > ### PRODUCTION MODEL
 > **`model_v3.ipynb`** — T = 1 PM anchor, 46 features (incl. HRRR path-5).
@@ -119,6 +125,31 @@ floor. The gap is worst in spring (MAM CRPS 2.7× v3) — the Kalshi window.
 
 **Tracked:** v4's complete artifact set is committed at `data/model_v4_artifacts/`
 (parallel to v3) for the record — it is **not** production.
+
+### 1.5 Production pivot: market_wing, flat-$, model-free (2026-05-29)
+
+`market_wing + drop_lower_ask` (market anchor, no agreement) is the production
+candidate. Established this session:
+
+- **The v3 model is NOT used by market_wing.** Verified in code: anchor = market
+  modal, `require_agreement=False`, `p_used = assumed_win_prob` (overrides the model
+  PMF), `equal_payout` split, regime throttle bypassed under flat sizing. The PMF
+  only feeds diagnostics. → the **same-day weather anchor (old P3) is obsolete for
+  production** — the engine runs market-only, no weather, no model, no creds.
+- **Sizing: flat-$, not Kelly.** Kelly@0.99 was an ~8× over-bet (its only size
+  variation came from the throttle, which mis-fired on the 2026-04-16 tail). The
+  `assumed_win_prob` sweep showed 0.92 halves the drawdown for ~90% of PnL; flat
+  sizing ~tripled Sharpe at parity PnL/DD. Flat-$ ($2.50) chosen for the $25
+  non-compounding account. **Caveat** (memory `project_sizing_flat_dollar`): flat-$
+  re-risks during drawdowns and is in-sample-WR-dependent; **flat-% is the principled
+  long-run choice** — revisit when scaling capital.
+- **$25 scale validated (Phase 0):** net-positive at every flat-$ level; a fee-aware
+  gate + `max_ask_sum 0.90` trim the ~10% fee-dead high-cost days (fee drag ~4% vs
+  2.6% at $1000).
+- **Engine wiring:** `ModelCfg.enabled` (config `false`) gates `run_cycle` to skip
+  refresh/features/predict and use a uniform placeholder PMF; `_dispatch_strategy`
+  routes `strategy.name` → `run_wing_strategy`. Replaces the hardcoded `joint_kelly`
+  (a known loser). flat-$ + fee-aware added to `run_wing_strategy`.
 
 ---
 
@@ -247,14 +278,17 @@ Expected: 22 fires, +$308 PnL, 20/2 W/L. Positions land in `data/prod_backtest_p
 
 ## 7. Open items
 
-| # | Task | Notes |
+| # | Task | Status / Notes |
 |---|---|---|
-| P1 | **Live deployment of `wing + drop_lower_ask`** | Wire production candidate into `engine.py` dispatch; verify paper-mode behavior matches backtest |
-| P2 | **Paper-mode liquidity verification** | Does Kalshi orderbook actually offer at the backtest's assumed `mid + 1¢` ask? May need to widen the assumed spread |
-| P3 | **Same-day live anchor** | ASOS-1min lag (~24-48h via IEM) blocks same-day prediction. Synoptic Mesonet API is the leading candidate |
-| P4 | **Tail-risk mitigation** | The 1-per-22-trades "calm-day catastrophe" (e.g., 2026-04-16 -$181) isn't gated. Options: lower `kelly_fraction`, lower `per_contract_max_pct`, or add a "no-edge-when-quiet" throttle |
-| P5 | **Confidence-floor variant** | The catastrophic day had model_modal_p = 0.346. A `model_modal_p >= 0.40` filter would have skipped it. Test on the 22-day set |
-| cleanup | `data/hrrr_12z_KMDW_legacy.parquet` | 9-var pre-path-5 snapshot, can be deleted |
+| P1 | **Wire production strategy into the engine** | ✅ DONE — config dispatch → `market_wing + drop_lower_ask` + flat-$ sizing, replacing `joint_kelly`. Model-free path (`ModelCfg.enabled=false`) verified end-to-end in paper on live data. |
+| L1 | **Deploy the orderbook logger always-on** | `scripts/orderbook_logger.py` on a VM/Pi via `deploy/orderbook-logger.service` (see `deploy/README.md`). Keyless. Survives laptop shutdown + auto-restarts. |
+| L2 | **Go live** | Add Kalshi RSA creds (`KALSHI_KEY_ID` / `KALSHI_PRIVATE_KEY_PATH`), set `mode: live`, run the engine at the 1 PM anchor on an always-on host. Real bankroll $25. |
+| L3 | **Fill reconciliation** | LIVE books the limit price as the fill; add a `/portfolio/fills` poll + wire the unused `get_balance`/`get_positions`. Low-$ impact at $25 → deferred. |
+| P2 | **Liquidity verification** | Does Kalshi fill at the assumed `mid + 1¢`? The orderbook logger's depth ladders now answer this directly from collected data. |
+| ~~P3~~ | ~~Same-day live anchor~~ | **OBSOLETE for production** — market_wing is model-free (§1.5), so no same-day weather feed is needed. (Free real-time sources verified anyway: NWS `metar_substitute` / AviationWeather are token-free; precision = the hourly METAR T-group.) |
+| P4 | **Tail-risk** | Largely addressed by flat-$ sizing (no over-bet); the 04-16-type tail is now capped at the flat stake. |
+| P5 | **Expose flat-$ in the backtest harness** | The +$7.98/$25 production figure uses flat-$ + fee-aware sizing that lives only in `run_wing_strategy` / engine config — `backtest_strategy.py` has no `--wing-flat-usd` / `--wing-fee-aware` flag, so the headline number was an inline analysis. Add the flags so it reproduces from one command. |
+| cleanup | `data/hrrr_12z_KMDW_legacy.parquet` | 9-var pre-path-5 snapshot, deletable |
 
 ---
 

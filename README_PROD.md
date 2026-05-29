@@ -1,11 +1,15 @@
 # Forecast Alpha — Production Engine
 
 Terminal-resident, always-on trading bot for Kalshi `KXHIGHCHI` (KMDW daily-high).
-Reuses the v3 ML model from `notebooks/model_v3.ipynb` (CRPS 1.204 °F, 46 features).
+Ships with the v3 ML model from `notebooks/model_v3.ipynb` (CRPS 1.204 °F, 46 features)
+— used only when `model.enabled`; the current production strategy runs **model-free**.
 
-> **Status:** PAPER mode is the only mode validated end-to-end. LIVE mode is wired
-> but requires a paid Kalshi API key + 30-day paper-trade history before enabling.
-> See [§ Going LIVE](#going-live).
+> **Status:** PAPER, validated end-to-end. **Production strategy = model-free
+> `market_wing + drop_lower_ask`, flat-$ sizing** (config `strategy.name` +
+> `model.enabled: false`), dispatched via `engine._dispatch_strategy` →
+> `run_wing_strategy`. The v3 model is **not used** (anchor = market; HANDOFF §1.5).
+> LIVE needs only free Kalshi RSA creds + `mode: live` — no weather feed, no same-day
+> anchor. See [§ Going LIVE](#going-live).
 
 ---
 
@@ -26,10 +30,10 @@ Reuses the v3 ML model from `notebooks/model_v3.ipynb` (CRPS 1.204 °F, 46 featu
 │  STRATEGY     │  │  EXECUTION     │  │  SHARED INFRA   │
 │  engine       │  │  engine        │  │                 │
 │               │  │                │  │  config.py      │
-│  joint Kelly  │  │  paper / live  │  │  log.py         │
-│ + KL weight   │  │  fills, fees,  │  │  model.py       │
-│ + regime      │  │  risk caps,    │  │  pmf.py         │
-│   throttle    │  │  kill switch   │  │  features.py    │
+│ market_wing   │  │  paper / live  │  │  log.py         │
+│ model-free    │  │  fills, fees,  │  │  model.py       │
+│ flat-$ sizing │  │  risk caps,    │  │  pmf.py         │
+│ +fee-aware    │  │  kill switch   │  │  features.py    │
 │               │  │                │  │  data.py        │
 │  strategy.py  │  │  execution.py  │  │  kalshi.py      │
 │               │  │  positions.py  │  │  fees.py        │
@@ -128,6 +132,11 @@ python -m forecast_alpha --headless --loop
 
 ## What a cycle does
 
+> **Model-free mode (current production):** steps 1–4 are skipped — no refresh, no feature
+> build, no model prediction. The anchor is today's event date, a uniform placeholder PMF is
+> used, and step 6 dispatches `market_wing` via `_dispatch_strategy`. The full pipeline below
+> runs only when `model.enabled: true` (a model-anchored strategy such as `wing`).
+
 1. **Refresh data.** Subprocess to `refresh_data.py` (METAR/TAF/ASOS/CLI) + `backfill_hrrr.py`
    (12Z HRRR for the last 4 local days). Idempotent; safe to interrupt.
 2. **Pick anchor.** `latest_viable_anchor` — latest local date where wall-clock is past 1pm
@@ -156,24 +165,26 @@ python -m forecast_alpha --headless --loop
 
 ## Going LIVE
 
-PAPER is the default. Before you flip `mode: live`:
+PAPER is the default. The production strategy is **model-free**, so going live is short
+(no weather feed, no 30-day model-validation gate, no paid API tier):
 
-- [ ] Run PAPER for **30 trading days** and inspect `data/live_log.parquet` — does realized
-      edge track modeled edge after fees? Are there days the regime throttle should have
-      tripped but didn't?
-- [ ] Resolve HANDOFF §5.3 — adopt Synoptic ASOS so the anchor lands same-day instead of
-      ~2 days back. LIVE mode without same-day data is not useful; the market settles before
-      we ever predict.
-- [ ] Get a Kalshi paid API tier. Create an RSA-2048 key pair, upload the public key, save
-      the private key locally, set `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` in `.env`.
-- [ ] Set `strategy.bankroll_usd` to your *real* starting capital. The strategy reads this;
-      do not start large.
-- [ ] Set `risk.daily_max_loss_usd` to a number you can lose without flinching. The
-      execution engine refuses new entries once daily realized losses exceed this.
-- [ ] Run `python -m forecast_alpha --headless --no-refresh --anchor <yesterday>` and read
-      the log carefully — confirm orders that *would* be placed match your intuition.
+- [ ] Create a **free** Kalshi API key — generate an RSA-2048 key pair, upload the public
+      key in Kalshi settings, save the private key locally, set `KALSHI_KEY_ID` and
+      `KALSHI_PRIVATE_KEY_PATH` in `.env`. (Kalshi API access is free; no paid tier.)
+- [ ] `strategy.bankroll_usd` is already `25` — your real account. Do not start large.
+- [ ] Set `risk.daily_max_loss_usd` to a number you can lose without flinching; execution
+      refuses new entries once daily realized losses exceed it.
+- [ ] Dry-run: `python -m forecast_alpha --headless --no-refresh` and read the log — confirm
+      the orders that *would* be placed match intuition. (Model-free needs no `--anchor` or
+      weather; the anchor is simply today's event date.)
+- [ ] Deploy on an always-on host so the 1 PM anchor fires with your laptop off — see
+      [`deploy/README.md`](deploy/README.md).
 
-When all of those are green, edit `config/forecast_alpha.yaml`:
+> Retired gates: the old "30 paper days" and "adopt Synoptic for same-day data" requirements
+> no longer apply — `market_wing` is model-free (HANDOFF §1.5), and at $25 this is deliberate
+> low-stakes live-learning.
+
+When those are green, edit `config/forecast_alpha.yaml`:
 ```yaml
 mode: live
 ```
@@ -186,7 +197,7 @@ time to write the kill-switch file (`data/KILL_SWITCH`) and stop further entries
 
 | # | Limitation | Mitigation |
 |---|---|---|
-| 1 | Anchor lags ~2 days behind because of IEM ASOS latency (HANDOFF §5.3). | Adopt Synoptic. |
+| 1 | Anchor lag (IEM ASOS, ~2 days) — **only affects `model.enabled` mode**; the production model-free path uses today's event date. | Obsolete for `market_wing`; adopt Synoptic only if running a model-anchored strategy. |
 | 2 | LIVE mode submits limit orders but doesn't reconcile partial fills via a polling loop. | Add a `kalshi.poll_orders` worker in scheduler before scaling capital. |
 | 3 | LIVE mode treats the limit price as the fill price for accounting. | Use the same poll-orders worker to update fills from `/portfolio/fills`. |
 | 4 | Features come from dynamic-exec of `notebooks/model_v3.ipynb` (fragile if the notebook moves). | Port §3.* cells into `forecast_alpha/features_v3.py` and validate parity. |

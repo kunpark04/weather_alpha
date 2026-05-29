@@ -119,6 +119,11 @@ Three orthogonal layers: **model** (notebook + artifacts), **strategy/execution*
 ## 6. Strategy results summary (one-line per variant)
 
 Full details + reproducible commands in [`HANDOFF.md`](HANDOFF.md) §1 and §6.
+> **Production pivoted 2026-05-29 → `market_wing + drop_lower_ask`, flat-$ sizing, MODEL-FREE.**
+> The table below is the original Kelly @ $1000 comparison; under flat-$2.50 on the real $25
+> account, `market_wing` is +$7.98 / +32% / 96% WR / −7% DD. The v3 model is **not used** by
+> `market_wing` (anchor=market, p_used=assumed_win_prob). See [`HANDOFF.md`](HANDOFF.md) §1.5.
+
 On 67-day Kalshi window (2026-03-21 → 2026-05-26), $1000 starting bankroll, quarter-Kelly:
 
 | # | Strategy | Days | WR% | PnL | Sharpe | Max DD |

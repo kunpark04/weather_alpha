@@ -97,10 +97,10 @@ ELIGIBLE = 60
 
 variants = [
     ("hard_floor",              ["--strategy", "hard_floor"]),
-    ("wing eq-payout (default)", ["--strategy", "wing", "--wing-base-rate", "0.98", "--wing-max-sum-3", "0.97"]),
-    ("wing eq-payout (loose)",  ["--strategy", "wing", "--wing-base-rate", "0.99", "--wing-max-sum-3", "1.00"]),
-    ("wing prob-weighted",      ["--strategy", "wing", "--wing-base-rate", "0.99", "--wing-max-sum-3", "1.00", "--wing-sizing-mode", "prob_weighted"]),
-    ("wing_any (no agreement)", ["--strategy", "wing_any", "--wing-base-rate", "0.99", "--wing-max-sum-3", "1.00"]),
+    ("wing eq-payout (default)", ["--strategy", "wing", "--wing-assumed-win-prob", "0.98", "--wing-max-ask-sum", "0.97"]),
+    ("wing eq-payout (loose)",  ["--strategy", "wing", "--wing-assumed-win-prob", "0.99", "--wing-max-ask-sum", "1.00"]),
+    ("wing prob-weighted",      ["--strategy", "wing", "--wing-assumed-win-prob", "0.99", "--wing-max-ask-sum", "1.00", "--wing-sizing-mode", "prob_weighted"]),
+    ("wing_any (no agreement)", ["--strategy", "wing_any", "--wing-assumed-win-prob", "0.99", "--wing-max-ask-sum", "1.00"]),
     ("joint_kelly (reference)", ["--strategy", "joint_kelly"]),
 ]
 

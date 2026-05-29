@@ -23,11 +23,11 @@ def run(args, out_name):
     return pd.read_parquet(_ROOT / f"data/{out_name}_positions.parquet")
 
 print("Running backtests...")
-strict_prob = run(["--wing-base-rate", "0.98", "--wing-max-sum-3", "0.97",
+strict_prob = run(["--wing-assumed-win-prob", "0.98", "--wing-max-ask-sum", "0.97",
                    "--wing-sizing-mode", "prob_weighted"], "strict_prob")
-loose_prob = run(["--wing-base-rate", "0.99", "--wing-max-sum-3", "0.99",
+loose_prob = run(["--wing-assumed-win-prob", "0.99", "--wing-max-ask-sum", "0.99",
                   "--wing-sizing-mode", "prob_weighted"], "loose_prob")
-loose_eq = run(["--wing-base-rate", "0.99", "--wing-max-sum-3", "0.99",
+loose_eq = run(["--wing-assumed-win-prob", "0.99", "--wing-max-ask-sum", "0.99",
                 "--wing-sizing-mode", "equal_payout"], "loose_eq")
 
 strict_dates = set(strict_prob["date"].unique())

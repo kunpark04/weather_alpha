@@ -309,10 +309,16 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
              force_adjacency: bool = False,
              override_lookup: dict | None = None,
              exit_rule: ExitRule | None = None,
-             wing_base_rate: float | None = None,
+             wing_assumed_win_prob: float | None = None,
              wing_sizing_mode: str = "equal_payout",
              wing_drop_worst_leg: bool = False,
-             wing_max_sum_3: float = 0.97) -> tuple[pd.DataFrame, pd.DataFrame]:
+             wing_drop_lower_ask: bool = False,
+             wing_drop_higher_ask: bool = False,
+             wing_max_ask_sum: float = 0.97,
+             wing_market_signal_power: float = 3.0,
+             wing_anchor: str = "model",
+             regime_peak_p_floor: float = 0.50,
+             regime_max_hrrr_gap_f: float = 4.0) -> tuple[pd.DataFrame, pd.DataFrame]:
     art = load_artifacts(cfg.paths.model_dir)
     cli_truth = {pd.Timestamp(d).normalize(): int(v)
                  for d, v in cli[["date", "max_temp_f"]].dropna().itertuples(index=False, name=None)}
@@ -376,6 +382,8 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
         elif strategy_name == "regime_confident":
             strat_out = run_regime_confident_strategy(
                 cfg.strategy, pred, contracts, feature_row, bankroll,
+                peak_p_floor=regime_peak_p_floor,
+                max_hrrr_gap_F=regime_max_hrrr_gap_f,
                 min_margin=min_margin, fire_mode=fire_mode, base_rate=base_rate,
                 smooth_sigma=0.0, force_adjacency=force_adjacency,
                 p_model_override=override,
@@ -391,15 +399,40 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
         elif strategy_name == "wing":
             strat_out = run_wing_strategy(
                 cfg.strategy, pred, contracts, feature_row, bankroll,
-                base_rate=wing_base_rate, sizing_mode=wing_sizing_mode,
-                drop_worst_leg=wing_drop_worst_leg, max_sum_3=wing_max_sum_3,
+                assumed_win_prob=wing_assumed_win_prob,
+                sizing_mode=wing_sizing_mode,
+                drop_worst_leg=wing_drop_worst_leg,
+                drop_lower_ask=wing_drop_lower_ask,
+                drop_higher_ask=wing_drop_higher_ask,
+                max_ask_sum=wing_max_ask_sum,
+                market_signal_power=wing_market_signal_power,
+                wing_anchor=wing_anchor,
             )
         elif strategy_name == "wing_any":
             strat_out = run_wing_strategy(
                 cfg.strategy, pred, contracts, feature_row, bankroll,
                 require_agreement=False,
-                base_rate=wing_base_rate, sizing_mode=wing_sizing_mode,
-                drop_worst_leg=wing_drop_worst_leg, max_sum_3=wing_max_sum_3,
+                assumed_win_prob=wing_assumed_win_prob,
+                sizing_mode=wing_sizing_mode,
+                drop_worst_leg=wing_drop_worst_leg,
+                drop_lower_ask=wing_drop_lower_ask,
+                drop_higher_ask=wing_drop_higher_ask,
+                max_ask_sum=wing_max_ask_sum,
+                market_signal_power=wing_market_signal_power,
+                wing_anchor=wing_anchor,
+            )
+        elif strategy_name == "market_wing":
+            strat_out = run_wing_strategy(
+                cfg.strategy, pred, contracts, feature_row, bankroll,
+                require_agreement=False,
+                wing_anchor="market",
+                assumed_win_prob=wing_assumed_win_prob,
+                sizing_mode=wing_sizing_mode,
+                drop_worst_leg=wing_drop_worst_leg,
+                drop_lower_ask=wing_drop_lower_ask,
+                drop_higher_ask=wing_drop_higher_ask,
+                max_ask_sum=wing_max_ask_sum,
+                market_signal_power=wing_market_signal_power,
             )
         else:
             strat_out = run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
@@ -563,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--assumed-spread-cents", type=int, default=2,
                     help="half-spread added to trade-price to approximate ask (default 2¢)")
     ap.add_argument("--strategy",
-                    choices=["joint_kelly", "two_bucket_arb", "tail", "hrrr_bias",
+                    choices=["joint_kelly", "two_bucket_arb", "tail", "hrrr_bias", "market_wing",
                              "regime_confident", "hard_floor", "variance",
                              "wing", "wing_any"],
                     default="joint_kelly", help="which strategy module to backtest")
@@ -587,14 +620,26 @@ def main(argv: list[str] | None = None) -> int:
                     help="Intraday exit: close all positions at hour H local (e.g., 20 = 8 PM).")
     ap.add_argument("--hold-confidence-floor", type=float, default=None,
                     help="Hold position to settlement only if rationale.confidence > X (else use intraday rules).")
-    ap.add_argument("--wing-base-rate", type=float, default=None,
-                    help="(wing/wing_any) override model's p_top_wing with this fixed base rate (e.g., 0.95).")
-    ap.add_argument("--wing-sizing-mode", choices=["equal_payout", "prob_weighted"],
-                    default="equal_payout", help="(wing) how to size per leg.")
+    ap.add_argument("--wing-assumed-win-prob", type=float, default=None,
+                    help="(wing/wing_any) override model's p_top_wing for Kelly sizing (e.g., 0.95).")
+    ap.add_argument("--wing-sizing-mode", choices=["equal_payout", "prob_weighted", "market_weighted"],
+                    default="equal_payout", help="(wing) per-leg sizing scheme.")
     ap.add_argument("--wing-drop-worst-leg", action="store_true",
-                    help="(wing) drop the leg with worst p_model - yes_ask before sizing.")
-    ap.add_argument("--wing-max-sum-3", type=float, default=0.97,
-                    help="(wing) max sum_asks across wing legs before strategy fires.")
+                    help="(wing) drop leg with worst p_model - yes_ask edge before sizing.")
+    ap.add_argument("--wing-drop-lower-ask", action="store_true",
+                    help="(wing) drop the lower-ask adjacent; trade modal + higher-ask adj.")
+    ap.add_argument("--wing-drop-higher-ask", action="store_true",
+                    help="(wing) PLACEBO: drop the higher-ask adjacent; trade modal + lower-ask adj.")
+    ap.add_argument("--wing-max-ask-sum", type=float, default=0.97,
+                    help="(wing) skip trade if sum of yes_asks across wing legs >= this.")
+    ap.add_argument("--wing-market-signal-power", type=float, default=3.0,
+                    help="(wing market_weighted) stake power for yes_ask (1=equal_payout, 3=~82/18 split).")
+    ap.add_argument("--regime-peak-p-floor", type=float, default=0.50,
+                    help="(regime_confident) min model top-1 bucket prob to fire.")
+    ap.add_argument("--regime-max-hrrr-gap-f", type=float, default=4.0,
+                    help="(regime_confident) max |HRRR_max - cli_yesterday| in F to fire.")
+    ap.add_argument("--wing-anchor", choices=["model", "market"], default="model",
+                    help="(wing/wing_any) which modal to use as wing center. market_wing forces 'market'.")
     ap.add_argument("--out", default="data/backtest_results.parquet")
     args = ap.parse_args(argv)
 
@@ -632,10 +677,16 @@ def main(argv: list[str] | None = None) -> int:
                               force_adjacency=args.force_adjacency,
                               override_lookup=override_lookup,
                               exit_rule=exit_rule,
-                              wing_base_rate=args.wing_base_rate,
+                              wing_assumed_win_prob=args.wing_assumed_win_prob,
                               wing_sizing_mode=args.wing_sizing_mode,
                               wing_drop_worst_leg=args.wing_drop_worst_leg,
-                              wing_max_sum_3=args.wing_max_sum_3)
+                              wing_drop_lower_ask=args.wing_drop_lower_ask,
+                              wing_drop_higher_ask=args.wing_drop_higher_ask,
+                              wing_max_ask_sum=args.wing_max_ask_sum,
+                              wing_market_signal_power=args.wing_market_signal_power,
+                              wing_anchor=args.wing_anchor,
+                              regime_peak_p_floor=args.regime_peak_p_floor,
+                              regime_max_hrrr_gap_f=args.regime_max_hrrr_gap_f)
     print(f"\nstrategy:  {args.strategy}  fire_mode={args.fire_mode}  "
           f"min_margin={args.min_margin}  base_rate={args.base_rate}  "
           f"smooth_sigma={args.smooth_sigma}  force_adjacency={args.force_adjacency}  "

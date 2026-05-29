@@ -452,27 +452,25 @@ def run_wing_strategy(
     feature_row: pd.Series | None,
     bankroll_usd: float,
     *,
-    max_sum_3: float = 0.97,
-    min_ev_pct: float = 0.0,
+    max_ask_sum: float = 0.97,
+    min_ev_margin: float = 0.0,
     require_agreement: bool = True,
-    base_rate: float | None = None,
+    assumed_win_prob: float | None = None,
     sizing_mode: str = "equal_payout",
     drop_worst_leg: bool = False,
+    drop_lower_ask: bool = False,
+    drop_higher_ask: bool = False,
+    market_signal_power: float = 3.0,
+    wing_anchor: str = "model",
 ) -> StrategyOutput:
-    """3-bucket wing: cover modal + both positional adjacents.
+    """Wing strategy: cover modal + adjacents, optionally drop one adjacent.
 
-    Concept: instead of trading model-vs-market disagreement (which loses), trade
-    AGREEMENT days using the wing to capture the ~87.8% top-3 hit rate at a small
-    per-trade edge. Many small wins, occasional losses.
+    Concept: trade AGREEMENT days (model & market modal match) using a coverage
+    wing to capture the ~84% within-2F hit rate at a small per-trade edge.
+    Many small wins, occasional larger losses on outlier truth.
 
-    Fires when:
-      - >= 3 live contracts with modal not at layout edge
-      - (require_agreement=True) model's modal matches market's modal
-      - sum_3 < max_sum_3 (room for any positive return)
-      - p_top_wing > sum_3 + min_ev_pct (positive EV after the miss case)
-
-    Sizing: equal-payout K*c_i per leg. Whichever leg hits, same dollar profit.
-    Kelly on the binary "in wing or not" bet.
+    Sizing: equal-payout (K*ask per leg) by default - whichever leg wins pays
+    the same gross. Kelly on the binary "in wing or not" bet.
     """
     from forecast_alpha.pmf import bucket_lower_bound, bucket_prob
 
@@ -500,52 +498,96 @@ def run_wing_strategy(
         return StrategyOutput(targets=[], diagnostics={
             **diag_base, "reason": "model-market disagreement (require_agreement=True)"})
 
-    # Find modal's position in the layout
+    # Pick wing anchor (center): model_modal (default) or market_modal.
+    if wing_anchor == "market":
+        anchor_c = market_modal_c
+    elif wing_anchor == "model":
+        anchor_c = model_modal_c
+    else:
+        raise ValueError(f"unknown wing_anchor: {wing_anchor!r}")
+    diag_base["wing_anchor"] = wing_anchor
+
+    # Find anchor's position in the layout
     sorted_by_pos = sorted(live, key=lambda c: bucket_lower_bound(c.bucket_spec))
     try:
-        modal_pos = sorted_by_pos.index(model_modal_c)
+        modal_pos = sorted_by_pos.index(anchor_c)
     except ValueError:
         return StrategyOutput(targets=[], diagnostics={
-            **diag_base, "reason": "modal not found in sorted layout"})
+            **diag_base, "reason": "anchor not found in sorted layout"})
 
-    # Build wing: modal + both positional adjacents
-    wing: list[KalshiContract] = [model_modal_c]
+    # Build wing: anchor + both positional adjacents
+    wing: list[KalshiContract] = [anchor_c]
     if modal_pos > 0:
         wing.append(sorted_by_pos[modal_pos - 1])
     if modal_pos < len(sorted_by_pos) - 1:
         wing.append(sorted_by_pos[modal_pos + 1])
-    if len(wing) < 3:
-        return StrategyOutput(targets=[], diagnostics={
-            **diag_base, "reason": f"modal at edge of layout (wing size {len(wing)})"})
 
-    # Optionally drop the leg with worst per-leg EV (p_model - c) BEFORE filters
-    if drop_worst_leg and len(wing) > 2:
-        edges = [(c, bucket_prob(pmf_values, c.bucket_spec) - c.yes_ask) for c in wing]
-        worst_c, worst_edge = min(edges, key=lambda x: x[1])
-        wing = [c for c in wing if c is not worst_c]
+    # For 3-leg wing concept, require both adjacents. For drop_X variants, a single
+    # adjacent at the edge is fine: the trade becomes [modal, the_one_adj] (no
+    # market-adjacency choice to make, just pure coverage).
+    allow_2leg = drop_lower_ask or drop_higher_ask or drop_worst_leg
+    min_wing_size = 2 if allow_2leg else 3
+    if len(wing) < min_wing_size:
+        return StrategyOutput(targets=[], diagnostics={
+            **diag_base, "reason": f"modal at edge of layout (wing size {len(wing)} < {min_wing_size})"})
+
+    # drop_worst_leg requires the ORIGINAL 3-leg wing to clear max_ask_sum first.
+    # Without this gate, dropping a leg lets the strategy fire on days where the
+    # full wing wouldn't have, and those days lose money on average.
+    if drop_worst_leg:
+        sum_full = sum(c.yes_ask for c in wing)
+        if sum_full >= max_ask_sum:
+            return StrategyOutput(targets=[], diagnostics={
+                **diag_base, "reason": f"pre-drop sum {sum_full:.3f} >= max {max_ask_sum}",
+                "sum_full": sum_full,
+            })
+        if len(wing) > 2:
+            edges = [(c, bucket_prob(pmf_values, c.bucket_spec) - c.yes_ask) for c in wing]
+            worst_c, worst_edge = min(edges, key=lambda x: x[1])
+            wing = [c for c in wing if c is not worst_c]
+
+    # drop_lower_ask: keep modal + higher-ask adjacent.
+    # Leans into the market's adjacency-direction signal (empirically ~82% accurate
+    # on the 22-day sample, but tail-risky when wrong).
+    if drop_lower_ask and len(wing) > 2:
+        adjacents = [c for c in wing if c is not anchor_c]
+        if len(adjacents) >= 2:
+            adjacents.sort(key=lambda c: -c.yes_ask)
+            higher_ask_adj = adjacents[0]
+            wing = [anchor_c, higher_ask_adj]
+
+    # drop_higher_ask: PLACEBO. Keep anchor + lower-ask adjacent.
+    # Should perform terribly if the adjacency signal is real.
+    if drop_higher_ask and len(wing) > 2:
+        adjacents = [c for c in wing if c is not anchor_c]
+        if len(adjacents) >= 2:
+            adjacents.sort(key=lambda c: c.yes_ask)
+            lower_ask_adj = adjacents[0]
+            wing = [anchor_c, lower_ask_adj]
 
     sum_asks = sum(c.yes_ask for c in wing)
     p_top_wing = sum(bucket_prob(pmf_values, c.bucket_spec) for c in wing)
 
-    # Use base_rate override if provided (e.g., empirical hit rate on agreement days);
-    # otherwise trust the model's per-day p_top_wing.
-    p_used = base_rate if base_rate is not None else p_top_wing
+    # assumed_win_prob overrides the model's per-day p_top_wing for Kelly sizing.
+    # Use this when you have a more reliable empirical hit-rate (e.g., 99% on
+    # agreement+wing days) than the model's per-day confidence.
+    p_used = assumed_win_prob if assumed_win_prob is not None else p_top_wing
     ev_margin = p_used - sum_asks
 
     diag_base.update({
-        "sum_asks_3":   sum_asks,
+        "sum_asks":     sum_asks,
         "p_top_wing":   p_top_wing,
         "p_used":       p_used,
         "ev_margin":    ev_margin,
     })
 
-    if sum_asks >= max_sum_3:
+    if sum_asks >= max_ask_sum:
         return StrategyOutput(targets=[], diagnostics={
-            **diag_base, "reason": f"sum_asks_3 {sum_asks:.3f} >= max {max_sum_3}"})
+            **diag_base, "reason": f"sum_asks {sum_asks:.3f} >= max {max_ask_sum}"})
 
-    if ev_margin < min_ev_pct:
+    if ev_margin < min_ev_margin:
         return StrategyOutput(targets=[], diagnostics={
-            **diag_base, "reason": f"EV margin {ev_margin:.3f} < min {min_ev_pct}"})
+            **diag_base, "reason": f"EV margin {ev_margin:.3f} < min {min_ev_margin}"})
 
     throttle = _regime_throttle(cfg.regime_throttle, prediction, feature_row)
     if throttle <= 0:
@@ -574,8 +616,16 @@ def run_wing_strategy(
         sum_p = sum(p_legs) or 1.0
         leg_stake_usd = [total_stake_usd * (p / sum_p) for p in p_legs]
     elif sizing_mode == "equal_payout":
-        # Equal payout: x_i = K * c_i  (yields n_i = K for all i)
+        # Equal payout: x_i = K * c_i  (yields n_i = K for all i).
+        # This is power=1 market-weighted: implicit ~67/33 split between adjacents.
         leg_stake_usd = [K * c.yes_ask for c in wing]
+    elif sizing_mode == "market_weighted":
+        # Amplified market signal: x_i proportional to (yes_ask_i)^power.
+        # power=1 == equal-payout. power=3 yields ~82/18 split between two adjacents
+        # (matching the empirical 82% market-adjacency accuracy).
+        weights = [(c.yes_ask) ** market_signal_power for c in wing]
+        sum_w = sum(weights) or 1.0
+        leg_stake_usd = [total_stake_usd * (w / sum_w) for w in weights]
     else:
         raise ValueError(f"unknown sizing_mode: {sizing_mode!r}")
 
@@ -592,7 +642,7 @@ def run_wing_strategy(
             bucket_spec=c.bucket_spec,
             rationale={
                 "strategy":      "wing",
-                "role":          "modal" if c == model_modal_c else "wing",
+                "role":          "anchor" if c == anchor_c else "wing",
                 "sizing_mode":   sizing_mode,
                 "p_model":       float(p_model_this),
                 "p_market":      float(c.yes_ask / sum_asks),
@@ -606,14 +656,14 @@ def run_wing_strategy(
             },
         ))
 
-    min_legs = 2 if drop_worst_leg else 3
+    min_legs = 2 if (drop_worst_leg or drop_lower_ask or drop_higher_ask) else 3
     if len(targets) < min_legs:
         return StrategyOutput(targets=[], diagnostics={
             **diag_base, "reason": f"only {len(targets)} legs after caps (need >= {min_legs})"})
 
     logger.info(
-        "wing: modal=%s sum_3=%.3f p_top_wing=%.3f ev=%.3f kelly=%.3f throttle=%.2f",
-        model_modal_c.bucket_spec, sum_asks, p_top_wing, ev_margin, kelly_full, throttle,
+        "wing(%s): anchor=%s sum_asks=%.3f p_top_wing=%.3f ev=%.3f kelly=%.3f throttle=%.2f",
+        wing_anchor, anchor_c.bucket_spec, sum_asks, p_top_wing, ev_margin, kelly_full, throttle,
     )
     return StrategyOutput(targets=targets, diagnostics={
         **diag_base, "n_targets": len(targets),

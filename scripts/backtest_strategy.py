@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -154,6 +155,12 @@ from forecast_alpha.strategy import (
 # Loading
 # ---------------------------------------------------------------------------
 
+# Standard meteorological season mapping — fallback when a model dir holds only
+# OOF arrays and no constants.json (e.g. an R&D model backtested OOF-only).
+_SEASON_OF_MONTH = {12: "DJF", 1: "DJF", 2: "DJF", 3: "MAM", 4: "MAM", 5: "MAM",
+                    6: "JJA", 7: "JJA", 8: "JJA", 9: "SON", 10: "SON", 11: "SON"}
+
+
 def load_oof_dataset(model_dir: Path) -> dict:
     """Load OOF predictions + features. Drop rows where fold == -1 (warmup) or
     PMF contains NaN. Result is bias-free, in chronological order."""
@@ -254,7 +261,6 @@ def collect_calibration_days(cfg, oof, kalshi, cli, start, end,
     For each date: bucket-level model probs (from possibly-smoothed PMF), market-
     implied probs (yes_ask normalized), and which bucket actually won.
     """
-    art = load_artifacts(cfg.paths.model_dir)
     cli_truth = {pd.Timestamp(d).normalize(): int(v)
                  for d, v in cli[["date", "max_temp_f"]].dropna().itertuples(index=False, name=None)}
 
@@ -319,7 +325,16 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
              wing_anchor: str = "model",
              regime_peak_p_floor: float = 0.50,
              regime_max_hrrr_gap_f: float = 4.0) -> tuple[pd.DataFrame, pd.DataFrame]:
-    art = load_artifacts(cfg.paths.model_dir)
+    try:
+        art = load_artifacts(cfg.paths.model_dir)
+        f_grid, model_name, season_of_month = art.integer_f_grid, art.name, art.season_of_month
+    except FileNotFoundError:
+        from forecast_alpha.pmf import INTEGER_F_GRID
+        f_grid = INTEGER_F_GRID
+        model_name = Path(cfg.paths.model_dir).name
+        season_of_month = _SEASON_OF_MONTH
+        print(f"[backtest] No deployable artifacts in {cfg.paths.model_dir}; "
+              f"OOF-only mode (grid={len(f_grid)} bins, name={model_name}).")
     cli_truth = {pd.Timestamp(d).normalize(): int(v)
                  for d, v in cli[["date", "max_temp_f"]].dropna().itertuples(index=False, name=None)}
 
@@ -351,14 +366,14 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
         if smooth_sigma > 0:
             pmf_values = smooth_pmf(pmf_values, sigma=smooth_sigma)
         cdf = np.cumsum(pmf_values)
-        pmf_series = pd.Series(pmf_values, index=art.integer_f_grid, name="P")
+        pmf_series = pd.Series(pmf_values, index=f_grid, name="P")
         pred = Prediction(
-            date=date, model=art.name, pmf=pmf_series,
-            median=int(art.integer_f_grid[np.searchsorted(cdf, 0.50)]),
-            lo10=int(art.integer_f_grid[np.searchsorted(cdf, 0.10)]),
-            hi90=int(art.integer_f_grid[np.searchsorted(cdf, 0.90)]),
+            date=date, model=model_name, pmf=pmf_series,
+            median=int(f_grid[np.searchsorted(cdf, 0.50)]),
+            lo10=int(f_grid[np.searchsorted(cdf, 0.10)]),
+            hi90=int(f_grid[np.searchsorted(cdf, 0.90)]),
             peak_F=int(pmf_series.idxmax()), peak_P=float(pmf_series.max()),
-            season=art.season_of_month[date.month],
+            season=season_of_month[date.month],
             hard_floor=None, leaked_below_floor=0.0, nan_features=[],
         )
 
@@ -640,10 +655,20 @@ def main(argv: list[str] | None = None) -> int:
                     help="(regime_confident) max |HRRR_max - cli_yesterday| in F to fire.")
     ap.add_argument("--wing-anchor", choices=["model", "market"], default="model",
                     help="(wing/wing_any) which modal to use as wing center. market_wing forces 'market'.")
+    ap.add_argument("--model-dir", type=str, default=None,
+                    help="Override model artifact dir (e.g. data/model_v4_artifacts). OOF-only mode if it lacks deployable artifacts.")
+    ap.add_argument("--anchor-hour-local", type=int, default=None,
+                    help="Override local anchor hour for the market snapshot + entry (e.g. 0 = midnight).")
     ap.add_argument("--out", default="data/backtest_results.parquet")
     args = ap.parse_args(argv)
 
     cfg = load_config()
+    if args.model_dir is not None:
+        mp = Path(args.model_dir)
+        mp = mp if mp.is_absolute() else _PROJECT_ROOT / mp
+        cfg = dataclasses.replace(cfg, paths=dataclasses.replace(cfg.paths, model_dir=mp))
+    if args.anchor_hour_local is not None:
+        cfg = dataclasses.replace(cfg, model=dataclasses.replace(cfg.model, anchor_hour_local=args.anchor_hour_local))
     oof = load_oof_dataset(cfg.paths.model_dir)
     kalshi = load_kalshi_history(cfg.paths.data_dir / "kalshi_history.parquet")
     cli = pd.read_parquet(cfg.paths.data_dir / f"cli_{cfg.station}.parquet")

@@ -110,6 +110,16 @@ diffuse midnight book means a 2-leg wing covers only ~70% at ~the same cost →
 68% WR, −71% max DD. **Conclusion: the edge lives in the 1 PM information
 environment; the midnight anchor is not tradeable.** Repro scripts in §6.
 
+**Mechanism (quantified, `scripts/v3_v4_why.py`):** v4's PMF is ~2.4× wider than
+v3's (CRPS 2.85 vs 1.20 °F; 80% CI 14.3 vs 5.9 °F; peak prob 14.8% vs 31.2%)
+because a midnight anchor has (a) no same-day observations — by 1 PM the daily
+high is already realized on **58% of days** — (b) no 12Z HRRR forecast (not yet
+published at midnight; v4 has zero HRRR features), and (c) no running-max hard
+floor. The gap is worst in spring (MAM CRPS 2.7× v3) — the Kalshi window.
+
+**Tracked:** v4's complete artifact set is committed at `data/model_v4_artifacts/`
+(parallel to v3) for the record — it is **not** production.
+
 ---
 
 ## 2. Sizing & risk pipeline
@@ -230,6 +240,7 @@ Expected: 22 fires, +$308 PnL, 20/2 W/L. Positions land in `data/prod_backtest_p
 - `scripts/v3_v4_kalshi_compare.py` — v3-vs-v4 model & market accuracy at Kalshi resolution, both anchors (§1.4)
 - `scripts/wing_settlement.py` — 1/2/3-leg wing settlement % by model & anchor hour (§1.4)
 - `scripts/market_modal_coverage.py` — market top-1/2/3 modal coverage, midnight vs 1 PM (§1.4)
+- `scripts/v3_v4_why.py` — quantifies the v3-vs-v4 skill gap (CRPS, sharpness) + information mechanism (§1.4)
 - `scripts/backtest_strategy.py --model-dir <dir> --anchor-hour-local <H>` — backtest any model dir at any anchor hour; OOF-only mode if the dir lacks deployable artifacts
 
 ---

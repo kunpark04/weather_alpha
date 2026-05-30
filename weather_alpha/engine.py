@@ -90,10 +90,17 @@ async def run_cycle(
         logger.info("cycle (model-free): anchor=%s mode=%s", anchor.date(), cfg.mode)
 
     contracts = await kalshi.fetch_event(anchor, cfg.execution.market_event_pattern)
-    live = [c for c in contracts if c.is_live]
+    live, skip_reason = _tradeable_contracts(contracts, anchor)
 
     bankroll = _current_bankroll(cfg, book)
-    strat = _dispatch_strategy(cfg, pred, contracts, feature_row, bankroll)
+    if skip_reason is not None:
+        # W3: refuse to open into a closed / not-yet-open / mismatched event, and say so
+        # explicitly rather than emitting nothing silently. Settlement still reconciles below.
+        logger.warning("event guard: %s (anchor=%s) — no new positions this cycle",
+                       skip_reason, anchor.date())
+        strat = StrategyOutput(targets=[], diagnostics={"event_guard": skip_reason})
+    else:
+        strat = _dispatch_strategy(cfg, pred, contracts, feature_row, bankroll)
 
     exec_result = await execute(cfg, pred, contracts, strat, book, kalshi if cfg.is_live() else None)
 
@@ -150,6 +157,31 @@ def _dispatch_strategy(cfg: Config, pred, contracts, feature_row, bankroll: floa
             fee_aware=w.fee_aware,
         )
     return run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
+
+
+def _tradeable_contracts(contracts: list, anchor: pd.Timestamp) -> tuple[list, str | None]:
+    """W3 event-selection guard. Returns (live_contracts, skip_reason).
+
+    A non-None skip_reason means do NOT open new positions this cycle — surfaced
+    explicitly instead of silently emitting nothing. Cases: no contracts returned;
+    no live contracts (event closed or not yet open); the resolved event's market
+    close is already past (stale fetch / clock skew); or the resolved event ticker
+    doesn't match the anchor date (wrong event — never trade it).
+    """
+    if not contracts:
+        return [], f"no contracts returned for the {anchor.date()} event"
+    live = [c for c in contracts if c.is_live]
+    if not live:
+        return [], "no live contracts (event closed or not yet open)"
+    expected_code = anchor.strftime("%y%b%d").upper()           # e.g. 26MAY30, as built by fetch_event
+    if not any(expected_code in (c.event_ticker or "") for c in live):
+        return [], (f"resolved event {{{','.join(sorted({c.event_ticker for c in live}))}}} "
+                    f"does not match anchor date {expected_code}")
+    now_utc = pd.Timestamp.now(tz="UTC")
+    closes = [c.close_time_utc for c in live if c.close_time_utc is not None]
+    if closes and max(closes) <= now_utc:
+        return [], f"event market already closed (latest close {max(closes)})"
+    return live, None
 
 
 def _current_bankroll(cfg: Config, book: Book) -> float:

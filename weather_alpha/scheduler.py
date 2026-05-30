@@ -13,9 +13,11 @@ Cadence:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 import pandas as pd
 
@@ -40,9 +42,12 @@ class SchedulerState:
 
 
 class Scheduler:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, state_path: Path | str | None = None):
         self._cfg = cfg
+        self._state_path = Path(state_path) if state_path else None
         self.state = SchedulerState()
+        if self._state_path is not None:
+            self._load()
 
     def now_local(self) -> pd.Timestamp:
         return pd.Timestamp.now(tz=self._cfg.local_tz)
@@ -90,6 +95,51 @@ class Scheduler:
             self.state.last_intraday_run = when
         elif action == Action.INTRADAY:
             self.state.last_intraday_run = when
+        if self._state_path is not None:
+            self._save()
+
+    # ---- persistence (W2: survive a restart without re-firing the day's anchor) ----
+
+    def _save(self) -> None:
+        """Atomically persist scheduler state. Best-effort: a write failure logs but
+        never propagates into the trading loop."""
+        s = self.state
+        def _iso(t: pd.Timestamp | None) -> str | None:
+            return t.isoformat() if t is not None else None
+        data = {
+            "last_data_refresh":    _iso(s.last_data_refresh),
+            "last_anchor_run_date": _iso(s.last_anchor_run_date),
+            "last_intraday_run":    _iso(s.last_intraday_run),
+            "last_action":          s.last_action.value,
+        }
+        try:
+            path = self._state_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            logger.warning("could not persist scheduler state to %s", self._state_path)
+
+    def _load(self) -> None:
+        path = self._state_path
+        if not path.exists():
+            return
+        try:
+            d = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("could not read scheduler state at %s; starting fresh", path)
+            return
+        def _ts(v) -> pd.Timestamp | None:
+            return pd.Timestamp(v) if v else None
+        self.state = SchedulerState(
+            last_data_refresh=_ts(d.get("last_data_refresh")),
+            last_anchor_run_date=_ts(d.get("last_anchor_run_date")),
+            last_intraday_run=_ts(d.get("last_intraday_run")),
+            last_action=Action(d.get("last_action", Action.IDLE.value)),
+        )
+        logger.info("scheduler state restored from %s (last_anchor_run_date=%s, last_action=%s)",
+                    path.name, self.state.last_anchor_run_date, self.state.last_action.value)
 
     def next_anchor_in(self) -> pd.Timedelta:
         """How long until the next anchor (for display)."""

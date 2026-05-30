@@ -78,7 +78,7 @@ class WeatherAlphaApp(App):
         self._cfg = cfg
         self._art = art
         self._book = book
-        self._scheduler = Scheduler(cfg)
+        self._scheduler = Scheduler(cfg, cfg.paths.scheduler_state)
         self._kalshi: KalshiClient | None = None
         self._busy = False
 

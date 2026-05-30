@@ -85,7 +85,7 @@ async def _run_headless(cfg, art, book, args) -> int:
             _print_summary(result)
             return 0
 
-        scheduler = Scheduler(cfg)
+        scheduler = Scheduler(cfg, cfg.paths.scheduler_state)
         logger.info("headless loop starting; ctrl-C to stop")
         try:
             while True:

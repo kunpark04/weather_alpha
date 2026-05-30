@@ -140,7 +140,20 @@ async def execute(
             halted, halt_reason = True, "daily_outlay_cap"
             break
 
-        fill = await _execute_one(cfg, c, tgt_delta, client, anchor_date=anchor_iso)
+        # W4: an order-placement exception must NOT abort the cycle (which would leave a
+        # half-filled wing and skip the Book save below). Catch it, record the leg as
+        # errored, and stop placing further legs. Already-filled legs are persisted by the
+        # book.save below; the deterministic wa- client_order_id (C4) makes a next-cycle
+        # retry of an unbooked leg idempotent at the exchange.
+        try:
+            fill = await _execute_one(cfg, c, tgt_delta, client, anchor_date=anchor_iso)
+        except Exception:
+            logger.exception("leg %s raised in _execute_one — halting cycle; "
+                             "already-filled legs are persisted", c.ticker)
+            rows.append(_skip_row(cfg, run_utc, t_utc, prediction, c, tgt_delta, reason="error"))
+            skipped += 1
+            halted, halt_reason = True, "leg_error"
+            break
         if fill is None:
             rows.append(_skip_row(cfg, run_utc, t_utc, prediction, c, tgt_delta, reason="rejected"))
             skipped += 1

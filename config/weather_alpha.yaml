@@ -13,6 +13,7 @@ paths:
   notebook_v3: notebooks/model_v3.ipynb
   logs_dir: logs
   kill_switch: data/KILL_SWITCH
+  scheduler_state: data/scheduler_state.json   # persisted so a restart doesn't re-fire the day's anchor
 
 model:
   name: v3

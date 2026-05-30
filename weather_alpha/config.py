@@ -27,6 +27,7 @@ class Paths:
     notebook_v3: Path
     logs_dir: Path
     kill_switch: Path
+    scheduler_state: Path
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,7 @@ def load_config(path: Path | str | None = None) -> Config:
         notebook_v3=_abs(raw["paths"]["notebook_v3"]),
         logs_dir=_abs(raw["paths"]["logs_dir"]),
         kill_switch=_abs(raw["paths"]["kill_switch"]),
+        scheduler_state=_abs(raw["paths"].get("scheduler_state", "data/scheduler_state.json")),
     )
     model = ModelCfg(**raw["model"])
     throttle = RegimeThrottle(**raw["strategy"]["regime_throttle"])

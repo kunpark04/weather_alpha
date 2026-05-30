@@ -171,7 +171,9 @@ PAPER is the default. The production strategy is **model-free**, so going live i
 - [ ] Create a **free** Kalshi API key — generate an RSA-2048 key pair, upload the public
       key in Kalshi settings, save the private key locally, set `KALSHI_KEY_ID` and
       `KALSHI_PRIVATE_KEY_PATH` in `.env`. (Kalshi API access is free; no paid tier.)
-- [ ] `strategy.bankroll_usd` is already `25` — your real account. Do not start large.
+- [ ] `strategy.bankroll_usd` is already `25` — but in LIVE the engine verifies the real
+      balance via `get_balance()` at startup and re-syncs after each settlement, so the config
+      value is only a paper default / hint. Do not start large.
 - [ ] Set `risk.daily_max_loss_usd` to a number you can lose without flinching; execution
       refuses new entries once daily realized losses exceed it.
 - [ ] Dry-run: `python -m weather_alpha --headless --no-refresh` and read the log — confirm
@@ -202,7 +204,10 @@ use the Kalshi UI for that. (The TUI's `k` key writes the same `data/KILL_SWITCH
 
 > **Pre-live order-safety review (2026-05-30):** an adversarial engine review found and fixed
 > 4 CRITICAL live-path bugs — fill confirmation (no phantom positions), deterministic order
-> ids (no duplicate orders on retry), and intraday risk circuit breakers. See
+> ids (no duplicate orders on retry), and intraday risk circuit breakers. A follow-up pass then
+> filled the WARN-tier robustness gaps — LIVE bankroll verified from `get_balance()` + re-synced
+> after settlement, scheduler state persisted across restart, an event-selection guard, and
+> per-leg order-error handling (W1-W5). See
 > [`tasks/review_engine_logic.md`](tasks/review_engine_logic.md). A stats review
 > ([`tasks/review_backtest_stats.md`](tasks/review_backtest_stats.md)) rates the edge real but
 > thin/front-loaded → keep this a **$2.50 toy forward-test; do not scale capital** on it.
@@ -214,8 +219,8 @@ use the Kalshi UI for that. (The TUI's `k` key writes the same `data/KILL_SWITCH
 | # | Limitation | Mitigation |
 |---|---|---|
 | 1 | Anchor lag (IEM ASOS, ~2 days) — **only affects `model.enabled` mode**; the production model-free path uses today's event date. | Obsolete for `market_wing`; adopt Synoptic only if running a model-anchored strategy. |
-| 2 | LIVE mode submits limit orders but doesn't reconcile partial fills via a polling loop. | Add a `kalshi.poll_orders` worker in scheduler before scaling capital. |
-| 3 | LIVE mode treats the limit price as the fill price for accounting. | Use the same poll-orders worker to update fills from `/portfolio/fills`. |
+| 2 | LIVE books only confirmed fills (C1 polls `get_positions`), but doesn't yet reconcile the Book against `get_positions()` at *cycle start* — an out-of-band or mid-exception fill stays unbooked. | Add a cycle-start `get_positions()` reconcile (the C1/W5 tail) before scaling capital. |
+| 3 | LIVE books the observed avg fill price (C1), not the limit; the booked *fee* is still estimated from that price rather than read from `/portfolio/fills`. | Reconcile fees from `/portfolio/fills` (I4) — minor at $25. |
 | 4 | Features come from dynamic-exec of `notebooks/model_v3.ipynb` (fragile if the notebook moves). | Port §3.* cells into `weather_alpha/features_v3.py` and validate parity. |
 | 5 | Kalshi WebSocket is not wired (REST polling only). | Add `kalshi.ws` and switch real-time market state to WS feed. |
 | 6 | Regime throttle uses simple thresholds; no learned regime classifier. | Train a regime classifier on `live_log.parquet` once it has ≥ 60 days. |

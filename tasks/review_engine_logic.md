@@ -29,10 +29,24 @@ Verified by `scripts/check_live_execution.py` (mock client, no creds): full-fill
 count + deterministic coid; no-fill books nothing; partial books only the filled qty; the C3
 outlay cap halts with `halt_reason=daily_outlay_cap`. Paper smoke test still exit-0.
 
-**Still open (lower priority):** C2 buffer tuning; W1/W2 (persist in-flight order / scheduler
-state across restart); W5 (reconcile bankroll from `get_balance`); W3/W4 (event-selection
-robustness for the 2-events-open case). The C1 fix (read exchange, don't trust the Book) is the
-foundation for W1/W5.
+## RESOLUTION (2026-05-30, pass 2) — W1–W5 fixed + verified
+
+| ID | Status | Fix |
+|---|---|---|
+| W1 / W5 (bankroll ignores the real balance) | ✅ FIXED | `Book.bankroll_cents` is the authoritative running bankroll. `engine.verify_bankroll()` reads Kalshi `get_balance()` at LIVE activation (config `bankroll_usd` is only a hint) and re-syncs it after every settlement; a `$0` balance logs CRITICAL → bankroll 0 → no trades (soft funding gate). PAPER still computes from realized PnL. Wired into `main._run_headless` + `tui.on_mount`. |
+| W2 (scheduler state lost on restart) | ✅ FIXED | `Scheduler` persists `SchedulerState` (atomic JSON) to `paths.scheduler_state` and reloads on construction; `record()` auto-saves. A same-day restart no longer re-fires `ANCHOR`. |
+| W3 (2-events-open / closed event) | ✅ FIXED | `engine._tradeable_contracts()` opens only into a live, future-closing event whose ticker matches the anchor date; otherwise it logs the reason and emits no new positions (was a silent no-trade). |
+| W4 (uncaught `place_order` exception aborts the cycle) | ✅ FIXED | `_execute_one` is wrapped per-leg in `execute()`; an exception records the leg as errored (`halt_reason=leg_error`), halts further legs, and the Book is still persisted. The deterministic `wa-` coid keeps a next-cycle retry idempotent. |
+
+Verified by a bankroll mock-balance test (live-adopt / post-settlement re-sync / zero-gate /
+paper-unchanged / persistence / back-compat) + W2/W3/W4 unit tests + `check_live_execution.py`
+(unchanged: ALL PASS). Commits `1c6b679` (rename + W1/W5), `292fd5d` (W2/W3/W4).
+
+**Still open:** the deeper C1/W5 tail — reconcile the Book against `get_positions()` at *cycle
+start*, so a fill that lands during a mid-confirmation exception (or any out-of-band position)
+is booked rather than trusted from local state; plus a write-ahead order-intent log (I1). Also
+C2 (marketable-limit buffer) and I2/I4 (live_log↔Book transactionality; fee from realized
+fill). All need a real authenticated account to exercise end-to-end.
 
 ---
 

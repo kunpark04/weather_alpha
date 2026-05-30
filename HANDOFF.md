@@ -235,10 +235,10 @@ Key §10.3 findings (2026-Q2, n=61):
 | `weather_alpha/strategy.py` | All 8 strategy functions; `run_wing_strategy` is the production code path |
 | `weather_alpha/calibration.py` | LOO α blending (model-market); currently α=0 (market-only) per LOO fit |
 | `weather_alpha/live_fetchers.py` | Async live data (METAR/TAF/ASOS/HRRR/CLI) for the running bot |
-| `weather_alpha/engine.py` | Production engine orchestrator |
+| `weather_alpha/engine.py` | Production engine orchestrator; `verify_bankroll` (LIVE balance) + `_tradeable_contracts` event guard |
 | `weather_alpha/tui.py` | Textual TUI for live monitoring |
 | `weather_alpha/main.py` | Entry point |
-| `weather_alpha/scheduler.py` | Anchor-aware loop |
+| `weather_alpha/scheduler.py` | Anchor-aware loop; state persisted to `data/scheduler_state.json` across restart |
 | `weather_alpha/pmf.py` | Bucket parsing, PMF utilities, Chernozhukov rearrangement |
 | `weather_alpha/fees.py` | Kalshi fee formula |
 | `weather_alpha/kalshi.py` | `KalshiContract` dataclass |
@@ -283,8 +283,8 @@ Expected: 22 fires, +$308 PnL, 20/2 W/L. Positions land in `data/prod_backtest_p
 | P1 | **Wire production strategy into the engine** | ✅ DONE — config dispatch → `market_wing + drop_lower_ask` + flat-$ sizing, replacing `joint_kelly`. Model-free path (`ModelCfg.enabled=false`) verified end-to-end in paper on live data. |
 | L1 | **Deploy the orderbook logger always-on** | `scripts/orderbook_logger.py` on a VM/Pi via `deploy/orderbook-logger.service` (see `deploy/README.md`). Keyless. Survives laptop shutdown + auto-restarts. |
 | L0 | **Order-safety hardening (pre-live review)** | ✅ DONE 2026-05-30. Engine+stats review (`tasks/review_engine_logic.md`, `tasks/review_backtest_stats.md`). All 4 CRITICALs fixed: C1 LIVE fill-confirmation (book actual fills via `get_positions`, not assumed), C4 deterministic `client_order_id` (no dup orders on retry), C3 per-leg kill-switch + intraday outlay breaker (`Book.daily_outlay_cents` vs `daily_max_loss_usd`) + `per_anchor_max_trades`. Kill switch: `python scripts/kill.py` (arm/disarm/status). Verified: `scripts/check_live_execution.py`. **Stats verdict: edge real (placebo passes) but thin + front-loaded → $2.50 toy forward-test only, don't scale.** |
-| L2 | **Go live** | Add Kalshi RSA creds (`KALSHI_KEY_ID` / `KALSHI_PRIVATE_KEY_PATH`); confirm with read-only `scripts/check_kalshi_auth.py`; set `mode: live`; run the engine at the 1 PM anchor on an always-on host. Real bankroll $25. |
-| L3 | **Deeper reconciliation (post-first-trade)** | C1 now reads `get_positions` for fills; still TODO: reconcile bankroll from `get_balance` (W5), persist in-flight order + scheduler state across restart (W1/W2), event-selection guard for 2-events-open (W3/W4). Low-$ at $25 → after first live trades. |
+| L2 | **Go live** | Add Kalshi RSA creds (`KALSHI_KEY_ID` / `KALSHI_PRIVATE_KEY_PATH`); confirm with read-only `scripts/check_kalshi_auth.py`; set `mode: live`; run the engine at the 1 PM anchor on an always-on host. On activation the engine verifies the real bankroll from `get_balance()` — config `$25` is only a hint. |
+| L3 | **Deeper reconciliation (post-first-trade)** | ✅ Mostly DONE 2026-05-30 (commits `1c6b679`, `292fd5d`): bankroll verified from `get_balance` at activation + re-synced after settlement (W1/W5); scheduler state persisted across restart (W2); event-selection guard (W3); per-leg `place_order` error handling (W4). **Still TODO:** reconcile the Book against `get_positions()` at *cycle start* (book out-of-band / mid-exception fills — the C1/W5 tail) + a write-ahead order-intent log (I1); needs a live authenticated account to exercise. |
 | P2 | **Liquidity verification** | Does Kalshi fill at the assumed `mid + 1¢`? The orderbook logger's depth ladders now answer this directly from collected data. |
 | ~~P3~~ | ~~Same-day live anchor~~ | **OBSOLETE for production** — market_wing is model-free (§1.5), so no same-day weather feed is needed. (Free real-time sources verified anyway: NWS `metar_substitute` / AviationWeather are token-free; precision = the hourly METAR T-group.) |
 | P4 | **Tail-risk** | Largely addressed by flat-$ sizing (no over-bet); the 04-16-type tail is now capped at the flat stake. |

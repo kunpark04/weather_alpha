@@ -97,6 +97,10 @@ Three orthogonal layers: **model** (notebook + artifacts), **strategy/execution*
 10. **CLAUDE.md and HANDOFF.md are not duplicates.** CLAUDE.md is architecture +
     behavior. HANDOFF.md is durable hand-off — full reproducible commands,
     detailed result tables, open items. Keep them aligned but distinct.
+11. **LIVE bankroll is the real Kalshi balance, not config.** `engine.verify_bankroll`
+    adopts `get_balance()` at activation and re-syncs after each settlement;
+    `strategy.bankroll_usd` is only a paper default / hint. Don't reintroduce
+    config-based sizing on the live path.
 
 ---
 

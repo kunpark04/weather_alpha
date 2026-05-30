@@ -86,6 +86,13 @@ class Book:
         """Total cents tied up in open positions (sum of contracts * avg_cost)."""
         return sum(int(p.contracts * p.avg_cost_cents) for p in self.positions.values() if not p.settled)
 
+    def daily_outlay_cents(self, anchor_date: str) -> int:
+        """Cents staked today for one anchor date = worst-case loss at risk before
+        settlement. Used by the intraday circuit breaker (C3): daily_loss_cents only
+        accrues at next-day settlement, so stake-at-risk is the honest same-day proxy."""
+        return sum(int(p.contracts * p.avg_cost_cents)
+                   for p in self.positions.values() if p.anchor_date == anchor_date)
+
     def open_for(self, ticker: str, side: str) -> Position | None:
         return self.positions.get(self._key(ticker, side))
 

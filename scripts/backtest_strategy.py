@@ -323,6 +323,8 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
              wing_max_ask_sum: float = 0.97,
              wing_market_signal_power: float = 3.0,
              wing_anchor: str = "model",
+             wing_flat_usd: float | None = None,
+             wing_fee_aware: bool = False,
              regime_peak_p_floor: float = 0.50,
              regime_max_hrrr_gap_f: float = 4.0) -> tuple[pd.DataFrame, pd.DataFrame]:
     try:
@@ -415,6 +417,8 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
             strat_out = run_wing_strategy(
                 cfg.strategy, pred, contracts, feature_row, bankroll,
                 assumed_win_prob=wing_assumed_win_prob,
+                flat_stake_usd=wing_flat_usd,
+                fee_aware=wing_fee_aware,
                 sizing_mode=wing_sizing_mode,
                 drop_worst_leg=wing_drop_worst_leg,
                 drop_lower_ask=wing_drop_lower_ask,
@@ -428,6 +432,8 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
                 cfg.strategy, pred, contracts, feature_row, bankroll,
                 require_agreement=False,
                 assumed_win_prob=wing_assumed_win_prob,
+                flat_stake_usd=wing_flat_usd,
+                fee_aware=wing_fee_aware,
                 sizing_mode=wing_sizing_mode,
                 drop_worst_leg=wing_drop_worst_leg,
                 drop_lower_ask=wing_drop_lower_ask,
@@ -442,6 +448,8 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
                 require_agreement=False,
                 wing_anchor="market",
                 assumed_win_prob=wing_assumed_win_prob,
+                flat_stake_usd=wing_flat_usd,
+                fee_aware=wing_fee_aware,
                 sizing_mode=wing_sizing_mode,
                 drop_worst_leg=wing_drop_worst_leg,
                 drop_lower_ask=wing_drop_lower_ask,
@@ -647,6 +655,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="(wing) PLACEBO: drop the higher-ask adjacent; trade modal + lower-ask adj.")
     ap.add_argument("--wing-max-ask-sum", type=float, default=0.97,
                     help="(wing) skip trade if sum of yes_asks across wing legs >= this.")
+    ap.add_argument("--wing-flat-usd", type=float, default=None,
+                    help="(wing) flat-$ total stake per trade (overrides Kelly); e.g. 2.5. Throttle bypassed.")
+    ap.add_argument("--wing-fee-aware", action="store_true",
+                    help="(wing) skip a fire when Kalshi fees would eat the entire equal-payout win.")
     ap.add_argument("--wing-market-signal-power", type=float, default=3.0,
                     help="(wing market_weighted) stake power for yes_ask (1=equal_payout, 3=~82/18 split).")
     ap.add_argument("--regime-peak-p-floor", type=float, default=0.50,
@@ -659,6 +671,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Override model artifact dir (e.g. data/model_v4_artifacts). OOF-only mode if it lacks deployable artifacts.")
     ap.add_argument("--anchor-hour-local", type=int, default=None,
                     help="Override local anchor hour for the market snapshot + entry (e.g. 0 = midnight).")
+    ap.add_argument("--bankroll", type=float, default=None,
+                    help="Override starting bankroll (default: config strategy.bankroll_usd). Compounds across days.")
     ap.add_argument("--out", default="data/backtest_results.parquet")
     args = ap.parse_args(argv)
 
@@ -669,6 +683,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg = dataclasses.replace(cfg, paths=dataclasses.replace(cfg.paths, model_dir=mp))
     if args.anchor_hour_local is not None:
         cfg = dataclasses.replace(cfg, model=dataclasses.replace(cfg.model, anchor_hour_local=args.anchor_hour_local))
+    if args.bankroll is not None:
+        cfg = dataclasses.replace(cfg, strategy=dataclasses.replace(cfg.strategy, bankroll_usd=args.bankroll))
     oof = load_oof_dataset(cfg.paths.model_dir)
     kalshi = load_kalshi_history(cfg.paths.data_dir / "kalshi_history.parquet")
     cli = pd.read_parquet(cfg.paths.data_dir / f"cli_{cfg.station}.parquet")
@@ -710,6 +726,8 @@ def main(argv: list[str] | None = None) -> int:
                               wing_max_ask_sum=args.wing_max_ask_sum,
                               wing_market_signal_power=args.wing_market_signal_power,
                               wing_anchor=args.wing_anchor,
+                              wing_flat_usd=args.wing_flat_usd,
+                              wing_fee_aware=args.wing_fee_aware,
                               regime_peak_p_floor=args.regime_peak_p_floor,
                               regime_max_hrrr_gap_f=args.regime_max_hrrr_gap_f)
     print(f"\nstrategy:  {args.strategy}  fire_mode={args.fire_mode}  "

@@ -188,8 +188,24 @@ When those are green, edit `config/forecast_alpha.yaml`:
 ```yaml
 mode: live
 ```
-and `python -m forecast_alpha`. The status bar will show `[LIVE]` in red. Press `k` at any
-time to write the kill-switch file (`data/KILL_SWITCH`) and stop further entries.
+and `python -m forecast_alpha`. The status bar will show `[LIVE]` in red.
+
+**Kill switch — halt at any time, from any terminal:**
+```powershell
+python scripts/kill.py            # ARM  — bot halts before the next order (even mid-cycle)
+python scripts/kill.py --status   # check
+python scripts/kill.py --disarm   # resume
+```
+The engine re-checks the switch **before every order**, not just at cycle start, so arming it
+stops a multi-leg wing partway. It does not cancel orders already resting on the exchange —
+use the Kalshi UI for that. (The TUI's `k` key writes the same `data/KILL_SWITCH` file.)
+
+> **Pre-live order-safety review (2026-05-30):** an adversarial engine review found and fixed
+> 4 CRITICAL live-path bugs — fill confirmation (no phantom positions), deterministic order
+> ids (no duplicate orders on retry), and intraday risk circuit breakers. See
+> [`tasks/review_engine_logic.md`](tasks/review_engine_logic.md). A stats review
+> ([`tasks/review_backtest_stats.md`](tasks/review_backtest_stats.md)) rates the edge real but
+> thin/front-loaded → keep this a **$2.50 toy forward-test; do not scale capital** on it.
 
 ---
 

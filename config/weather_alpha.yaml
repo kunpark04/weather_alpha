@@ -1,5 +1,5 @@
-# forecast_alpha — default configuration.
-# Override per-environment via $FORECAST_ALPHA_CONFIG=/path/to/custom.yaml.
+# weather_alpha — default configuration.
+# Override per-environment via $WEATHER_ALPHA_CONFIG=/path/to/custom.yaml.
 
 mode: paper                       # paper | live  (LIVE requires Kalshi credentials)
 station: KMDW
@@ -24,7 +24,7 @@ strategy:
   name: market_wing               # engine dispatch: market_wing | wing | wing_any | joint_kelly
   bankroll_usd: 25.0              # real Kalshi account balance (starting)
   kelly_fraction: 0.25            # quarter-Kelly (only used if a wing falls back to Kelly sizing)
-  wing:                           # wing knobs — see forecast_alpha/config.py:WingCfg
+  wing:                           # wing knobs — see weather_alpha/config.py:WingCfg
     drop_lower_ask: true
     require_agreement: false      # market_wing = market anchor, no agreement gate
     anchor: market

@@ -9,15 +9,15 @@
 # WantedBy=multi-user.target -> also starts automatically after a host reboot.
 
 [Unit]
-Description=Kalshi KXHIGHCHI orderbook logger (forecast-alpha)
+Description=Kalshi KXHIGHCHI orderbook logger (weather-alpha)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=fa
-WorkingDirectory=/opt/forecast-alpha
-ExecStart=/usr/bin/python3 /opt/forecast-alpha/scripts/orderbook_logger.py --interval 60 --out /opt/forecast-alpha/data/orderbook
+WorkingDirectory=/opt/weather-alpha
+ExecStart=/usr/bin/python3 /opt/weather-alpha/scripts/orderbook_logger.py --interval 60 --out /opt/weather-alpha/data/orderbook
 Restart=always
 RestartSec=10
 StandardOutput=journal

@@ -1,11 +1,11 @@
 """Entry point. Launches the Textual app (default) or runs one cycle in headless mode.
 
 Usage:
-    python -m forecast_alpha                    # launch the TUI (production)
-    python -m forecast_alpha --headless         # one-shot cycle, print summary, exit
-    python -m forecast_alpha --headless --loop  # headless scheduler loop (no TUI)
-    python -m forecast_alpha --anchor 2026-05-22  # force anchor date
-    forecast-alpha                              # same as `python -m forecast_alpha`
+    python -m weather_alpha                    # launch the TUI (production)
+    python -m weather_alpha --headless         # one-shot cycle, print summary, exit
+    python -m weather_alpha --headless --loop  # headless scheduler loop (no TUI)
+    python -m weather_alpha --anchor 2026-05-22  # force anchor date
+    weather-alpha                              # same as `python -m weather_alpha`
 """
 
 from __future__ import annotations
@@ -17,20 +17,20 @@ import sys
 
 import pandas as pd
 
-from forecast_alpha import __version__
-from forecast_alpha.config import load_config
-from forecast_alpha.engine import refresh_data, run_cycle
-from forecast_alpha.kalshi import KalshiClient
-from forecast_alpha.log import setup_logging
-from forecast_alpha.model import load_artifacts
-from forecast_alpha.positions import Book
-from forecast_alpha.scheduler import Action, Scheduler
+from weather_alpha import __version__
+from weather_alpha.config import load_config
+from weather_alpha.engine import refresh_data, run_cycle, verify_bankroll
+from weather_alpha.kalshi import KalshiClient
+from weather_alpha.log import setup_logging
+from weather_alpha.model import load_artifacts
+from weather_alpha.positions import Book
+from weather_alpha.scheduler import Action, Scheduler
 
 logger = logging.getLogger(__name__)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="forecast-alpha", description="Kalshi KXHIGHCHI trading bot")
+    p = argparse.ArgumentParser(prog="weather-alpha", description="Kalshi KXHIGHCHI trading bot")
     p.add_argument("--config", help="path to YAML config (else default + env override)")
     p.add_argument("--headless", action="store_true", help="run without the TUI")
     p.add_argument("--loop", action="store_true", help="(headless) keep scheduler running")
@@ -44,7 +44,7 @@ def run(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     cfg = load_config(args.config)
     setup_logging(cfg.paths.logs_dir)
-    logger.info("forecast-alpha v%s starting in %s mode", __version__, cfg.mode.upper())
+    logger.info("weather-alpha v%s starting in %s mode", __version__, cfg.mode.upper())
 
     art = load_artifacts(cfg.paths.model_dir)
     book = Book.load(cfg.paths.positions_snapshot)
@@ -62,8 +62,8 @@ def run(argv: list[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 
 def _run_tui(cfg, art, book) -> int:
-    from forecast_alpha.tui import ForecastAlphaApp
-    app = ForecastAlphaApp(cfg, art, book)
+    from weather_alpha.tui import WeatherAlphaApp
+    app = WeatherAlphaApp(cfg, art, book)
     app.run()
     return 0
 
@@ -76,6 +76,8 @@ async def _run_headless(cfg, art, book, args) -> int:
     force_anchor = pd.Timestamp(args.anchor).normalize() if args.anchor else None
 
     async with KalshiClient(cfg.kalshi, authenticated=cfg.is_live()) as kalshi:
+        # Verify the bankroll against the real account before the first LIVE trade.
+        await verify_bankroll(cfg, book, kalshi)
         if not args.loop:
             result = await run_cycle(cfg, art, book, kalshi,
                                      force_anchor=force_anchor,

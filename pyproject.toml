@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "forecast-alpha"
+name = "weather-alpha"
 version = "0.1.0"
 description = "Probabilistic ML forecaster + Kalshi KXHIGHCHI trading engine (KMDW daily-high)."
 requires-python = ">=3.11"
@@ -33,10 +33,10 @@ data = ["herbie-data>=2024.5", "xarray>=2024.3", "cfgrib>=0.9", "requests>=2.31"
 dev  = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4"]
 
 [project.scripts]
-forecast-alpha = "forecast_alpha.main:run"
+weather-alpha = "weather_alpha.main:run"
 
 [tool.setuptools.packages.find]
-include = ["forecast_alpha*"]
+include = ["weather_alpha*"]
 exclude = ["notebooks*", "archive*", "data*", "tests*"]
 
 [tool.ruff]

@@ -8,7 +8,7 @@ Look-ahead-bias prevention (see docstrings inside main()):
   - Kalshi quotes: last trade ON OR BEFORE the anchor moment (1 PM CDT/CST)
     on each date. NEVER post-anchor / post-settlement prices.
   - CLI truth: used only for settlement, never as a feature.
-  - Strategy / risk knobs: held at the values in config/forecast_alpha.yaml.
+  - Strategy / risk knobs: held at the values in config/weather_alpha.yaml.
     Don't tune them on this backtest's window — see CAVEATS in the printout.
 
 Usage:
@@ -33,7 +33,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from dataclasses import dataclass
 
-from forecast_alpha.calibration import (
+from weather_alpha.calibration import (
     CalibrationDay, build_override_lookup, leave_one_out_calibrate,
 )
 
@@ -132,14 +132,14 @@ def simulate_position(
 
     # No exit triggered; default to settlement.
     return _settle(), {"exit_type": "no_trigger_settled"}
-from forecast_alpha.config import load_config
-from forecast_alpha.fees import trade_fee_cents
-from forecast_alpha.kalshi import KalshiContract
-from forecast_alpha.model import Prediction, load_artifacts
-from forecast_alpha.pmf import (
+from weather_alpha.config import load_config
+from weather_alpha.fees import trade_fee_cents
+from weather_alpha.kalshi import KalshiContract
+from weather_alpha.model import Prediction, load_artifacts
+from weather_alpha.pmf import (
     INTEGER_F_GRID, bucket_prob, parse_bucket, parse_kalshi_subtitle, smooth_pmf,
 )
-from forecast_alpha.strategy import (
+from weather_alpha.strategy import (
     run_hard_floor_strategy,
     run_hrrr_bias_strategy,
     run_regime_confident_strategy,
@@ -331,7 +331,7 @@ def backtest(cfg, oof, kalshi, cli, start, end, assumed_spread_cents,
         art = load_artifacts(cfg.paths.model_dir)
         f_grid, model_name, season_of_month = art.integer_f_grid, art.name, art.season_of_month
     except FileNotFoundError:
-        from forecast_alpha.pmf import INTEGER_F_GRID
+        from weather_alpha.pmf import INTEGER_F_GRID
         f_grid = INTEGER_F_GRID
         model_name = Path(cfg.paths.model_dir).name
         season_of_month = _SEASON_OF_MONTH

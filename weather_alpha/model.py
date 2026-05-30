@@ -12,7 +12,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from forecast_alpha.pmf import (
+from weather_alpha.pmf import (
     INTEGER_F_GRID,
     apply_hard_floor,
     pmf_quantile,

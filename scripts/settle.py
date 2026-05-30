@@ -24,12 +24,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from forecast_alpha.config import load_config
-from forecast_alpha.data import load_bundle
-from forecast_alpha.engine import refresh_data
-from forecast_alpha.execution import reconcile_settlements
-from forecast_alpha.log import setup_logging
-from forecast_alpha.positions import Book
+from weather_alpha.config import load_config
+from weather_alpha.data import load_bundle
+from weather_alpha.engine import refresh_data
+from weather_alpha.execution import reconcile_settlements
+from weather_alpha.log import setup_logging
+from weather_alpha.positions import Book
 
 
 async def main(argv: list[str] | None = None) -> int:

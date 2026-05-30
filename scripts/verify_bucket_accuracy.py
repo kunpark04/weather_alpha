@@ -14,7 +14,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from forecast_alpha.pmf import parse_bucket, parse_kalshi_subtitle, bucket_prob
+from weather_alpha.pmf import parse_bucket, parse_kalshi_subtitle, bucket_prob
 
 # ---------------------------------------------------------------------------
 # A) Verify §10.2 -- fixed-edge 2F-bucket diagnostic on calibrated OOF

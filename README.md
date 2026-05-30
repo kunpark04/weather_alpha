@@ -1,4 +1,4 @@
-# Forecast Alpha
+# Weather Alpha
 
 Probabilistic ML model + production trading engine for **Kalshi `KXHIGHCHI`** —
 the daily maximum-temperature market at **KMDW** (Chicago Midway).
@@ -41,11 +41,11 @@ and open items.
 ## Project structure
 
 ```
-forecast-alpha/
+weather-alpha/
 ├── README.md                    you are here — project overview
 ├── HANDOFF.md                   durable hand-off (full results, open items)
 ├── CLAUDE.md                    architecture + behavioral guide for Claude
-├── README_PROD.md               production engine README (forecast_alpha/)
+├── README_PROD.md               production engine README (weather_alpha/)
 ├── Language and Architecture Choices ... .md   research / language trade-offs
 │
 ├── notebooks/
@@ -53,7 +53,7 @@ forecast-alpha/
 │   ├── model_v4.ipynb           parallel R&D variant (midnight anchor; NOT production)
 │   └── live_predict.ipynb       live prediction pipeline (loads v3 artifacts)
 │
-├── forecast_alpha/              production package (always-on bot)
+├── weather_alpha/              production package (always-on bot)
 │   ├── main.py / engine.py / scheduler.py / tui.py    orchestration + TUI
 │   ├── strategy.py              8 strategy fns; run_wing_strategy is production
 │   ├── execution.py             paper/live order routing
@@ -75,7 +75,7 @@ forecast-alpha/
 │   └── backfill_hrrr.py / refresh_data.py    historical data backfill
 │
 ├── config/
-│   └── forecast_alpha.yaml      bankroll, kelly_fraction, throttle, etc.
+│   └── weather_alpha.yaml      bankroll, kelly_fraction, throttle, etc.
 │
 ├── data/
 │   ├── kalshi_history.parquet   67 Kalshi events + per-ticker trades (Mar-May 2026)
@@ -134,7 +134,7 @@ decisions.
 |---|---|
 | [`HANDOFF.md`](HANDOFF.md) | Picking up the project after a break, or onboarding |
 | [`CLAUDE.md`](CLAUDE.md) | Working in this repo as Claude (or as a human who wants the same context) |
-| [`README_PROD.md`](README_PROD.md) | Running or extending the always-on production engine (`forecast_alpha/`) |
+| [`README_PROD.md`](README_PROD.md) | Running or extending the always-on production engine (`weather_alpha/`) |
 | [`Language and Architecture Choices ...`](Language%20and%20Architecture%20Choices%20for%20a%20Production-Grade%20Kalshi%20Trading%20Bot%20in%20the%20Terminal.md) | Understanding why Python + Textual + LightGBM (vs C++/Rust/Go alternatives) |
 | `notebooks/model_v3.ipynb` | Retraining the model or inspecting feature contributions |
 

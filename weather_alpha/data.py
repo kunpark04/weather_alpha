@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from forecast_alpha.live_fetchers import fetch_all_live
+from weather_alpha.live_fetchers import fetch_all_live
 
 logger = logging.getLogger(__name__)
 

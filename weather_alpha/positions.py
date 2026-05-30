@@ -36,6 +36,9 @@ class Book:
     realized_pnl_cents: int = 0
     fees_paid_cents: int = 0
     daily_loss_cents: dict[str, int] = field(default_factory=dict)      # date_iso -> cents
+    bankroll_cents: int | None = None     # authoritative running bankroll. LIVE: verified from
+                                          # Kalshi get_balance() at activation + re-synced after
+                                          # settlement. None => PAPER computes it from realized PnL.
 
     @staticmethod
     def _key(ticker: str, side: str) -> str:
@@ -104,17 +107,20 @@ class Book:
             "realized_pnl_cents": self.realized_pnl_cents,
             "fees_paid_cents":    self.fees_paid_cents,
             "daily_loss_cents":   self.daily_loss_cents,
+            "bankroll_cents":     self.bankroll_cents,
         }, indent=2)
 
     @classmethod
     def from_json(cls, raw: str) -> "Book":
         d = json.loads(raw)
         positions = {k: Position(**v) for k, v in d.get("positions", {}).items()}
+        bankroll = d.get("bankroll_cents")
         return cls(
             positions=positions,
             realized_pnl_cents=int(d.get("realized_pnl_cents", 0)),
             fees_paid_cents=int(d.get("fees_paid_cents", 0)),
             daily_loss_cents=dict(d.get("daily_loss_cents", {})),
+            bankroll_cents=(int(bankroll) if bankroll is not None else None),
         )
 
     def save(self, path: Path) -> None:

@@ -1,4 +1,4 @@
-# Forecast Alpha — Handoff (KMDW / Kalshi KXHIGHCHI)
+# Weather Alpha — Handoff (KMDW / Kalshi KXHIGHCHI)
 
 _Last updated: 2026-05-29_
 
@@ -164,7 +164,7 @@ where  f_stake = min(kelly_full × kelly_fraction × throttle, total_exposure_ma
 
 | Param | Value | Source |
 |---|---|---|
-| `bankroll_usd` | $1000 (paper) | `config/forecast_alpha.yaml` |
+| `bankroll_usd` | $1000 (paper) | `config/weather_alpha.yaml` |
 | `kelly_fraction` | 0.25 (quarter-Kelly) | config |
 | `assumed_win_prob` | 0.99 | CLI `--wing-assumed-win-prob` |
 | `max_ask_sum` | 1.00 | CLI `--wing-max-ask-sum` |
@@ -228,23 +228,23 @@ Key §10.3 findings (2026-Q2, n=61):
 
 ---
 
-## 5. Production code (forecast_alpha package)
+## 5. Production code (weather_alpha package)
 
 | Module | Role |
 |---|---|
-| `forecast_alpha/strategy.py` | All 8 strategy functions; `run_wing_strategy` is the production code path |
-| `forecast_alpha/calibration.py` | LOO α blending (model-market); currently α=0 (market-only) per LOO fit |
-| `forecast_alpha/live_fetchers.py` | Async live data (METAR/TAF/ASOS/HRRR/CLI) for the running bot |
-| `forecast_alpha/engine.py` | Production engine orchestrator |
-| `forecast_alpha/tui.py` | Textual TUI for live monitoring |
-| `forecast_alpha/main.py` | Entry point |
-| `forecast_alpha/scheduler.py` | Anchor-aware loop |
-| `forecast_alpha/pmf.py` | Bucket parsing, PMF utilities, Chernozhukov rearrangement |
-| `forecast_alpha/fees.py` | Kalshi fee formula |
-| `forecast_alpha/kalshi.py` | `KalshiContract` dataclass |
-| `forecast_alpha/model.py` | Artifact loader, `Prediction` dataclass |
-| `forecast_alpha/config.py` | YAML config loader |
-| `config/forecast_alpha.yaml` | Persistent config (bankroll, kelly_fraction, throttle, etc.) |
+| `weather_alpha/strategy.py` | All 8 strategy functions; `run_wing_strategy` is the production code path |
+| `weather_alpha/calibration.py` | LOO α blending (model-market); currently α=0 (market-only) per LOO fit |
+| `weather_alpha/live_fetchers.py` | Async live data (METAR/TAF/ASOS/HRRR/CLI) for the running bot |
+| `weather_alpha/engine.py` | Production engine orchestrator |
+| `weather_alpha/tui.py` | Textual TUI for live monitoring |
+| `weather_alpha/main.py` | Entry point |
+| `weather_alpha/scheduler.py` | Anchor-aware loop |
+| `weather_alpha/pmf.py` | Bucket parsing, PMF utilities, Chernozhukov rearrangement |
+| `weather_alpha/fees.py` | Kalshi fee formula |
+| `weather_alpha/kalshi.py` | `KalshiContract` dataclass |
+| `weather_alpha/model.py` | Artifact loader, `Prediction` dataclass |
+| `weather_alpha/config.py` | YAML config loader |
+| `config/weather_alpha.yaml` | Persistent config (bankroll, kelly_fraction, throttle, etc.) |
 
 ---
 

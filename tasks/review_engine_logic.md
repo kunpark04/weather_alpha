@@ -1,4 +1,4 @@
-# Adversarial Logic Review — LIVE trading path (forecast_alpha)
+# Adversarial Logic Review — LIVE trading path (weather_alpha)
 
 _Reviewer pass: read-only. Date: 2026-05-30. Scope: engine.py, execution.py, strategy.py,
 kalshi.py, config.py, positions.py, main.py, scheduler.py for the LIVE order path._
@@ -22,7 +22,7 @@ Summary counts: **4 CRITICAL, 6 WARN, 4 INFO.**
 | C1 (under-fill booked as full) | ✅ FIXED | LIVE `_execute_one` confirms the **actual** fill via `_live_held()` (reads `get_positions`), books only what filled, returns `None` on no-fill so the leg retries. Bounded poll (`_FILL_POLL_TRIES=3`) for late fills. |
 | C2 (limit at ask, zero buffer) | ⚠️ ACCEPTED | Kept limit-at-ask, but C1 removes the "assume filled" half — an unfilled leg is now correctly unbooked, not phantom. Marketable buffer left as a future tuning knob. |
 | C3 (one-shot checks; dead daily cap) | ✅ FIXED | Kill switch **re-checked before every leg**; new **intraday outlay circuit breaker** (`Book.daily_outlay_cents` vs `risk.daily_max_loss_usd`); `per_anchor_max_trades` enforced (was W6). |
-| C4 (no idempotency) | ✅ FIXED | Deterministic `client_order_id = fa-{anchor}-{ticker}-{side}` so a retry/re-run collides on Kalshi's uniqueness check instead of doubling. |
+| C4 (no idempotency) | ✅ FIXED | Deterministic `client_order_id = wa-{anchor}-{ticker}-{side}` so a retry/re-run collides on Kalshi's uniqueness check instead of doubling. |
 | W6 (per_anchor_max_trades unused) | ✅ FIXED | Enforced in the execute loop (folded into C3). |
 
 Verified by `scripts/check_live_execution.py` (mock client, no creds): full-fill books actual
@@ -140,7 +140,7 @@ in the live path — see C-note in W6).
 ---
 
 ### C4. No order idempotency: `client_order_id` defaults to a timestamp, so retries / restarts / two-events-open can place the same economic order twice
-**Files:** `kalshi.py:210` (`client_order_id or f"fa-{int(time.time()*1000)}"`),
+**Files:** `kalshi.py:210` (`client_order_id or f"wa-{int(time.time()*1000)}"`),
 `kalshi.py:223-251` (`_signed_request` retries POST on 5xx/TransportError),
 `execution.py:93-107` (no dedupe before booking).
 

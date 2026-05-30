@@ -25,10 +25,10 @@ continuous logger.
 ## Setup (Linux)
 ```bash
 # 1. provision a small Linux VM; then on it:
-sudo useradd -r -m -d /opt/forecast-alpha fa            # service user
-sudo mkdir -p /opt/forecast-alpha && sudo chown fa /opt/forecast-alpha
+sudo useradd -r -m -d /opt/weather-alpha fa            # service user
+sudo mkdir -p /opt/weather-alpha && sudo chown fa /opt/weather-alpha
 # 2. copy the logger (just the one file is enough — stdlib only):
-scp scripts/orderbook_logger.py  user@vm:/opt/forecast-alpha/scripts/
+scp scripts/orderbook_logger.py  user@vm:/opt/weather-alpha/scripts/
 # 3. python3 is preinstalled on most distros; tzdata is native on Linux.
 # 4. install + start the service:
 sudo cp deploy/orderbook-logger.service /etc/systemd/system/
@@ -39,9 +39,9 @@ journalctl -u orderbook-logger -f
 ```
 
 ## Operate
-- **Output:** `/opt/forecast-alpha/data/orderbook/<EVENT-DATE>/<ticker>.jsonl` while a
+- **Output:** `/opt/weather-alpha/data/orderbook/<EVENT-DATE>/<ticker>.jsonl` while a
   day is trading; auto-zipped to `<EVENT-DATE>.zip` once that event settles.
-- **Retrieve zips:** `rsync -av user@vm:/opt/forecast-alpha/data/orderbook/*.zip ./`
+- **Retrieve zips:** `rsync -av user@vm:/opt/weather-alpha/data/orderbook/*.zip ./`
   (or a daily cron pushing to cloud storage — optional hardening).
 - **Cadence:** edit `--interval` in the unit (`60` = 1-min, `300` = 5-min). 1-min is
   ~0.2 req/s, far under Kalshi's public limit.

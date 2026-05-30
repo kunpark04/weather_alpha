@@ -1,4 +1,4 @@
-# Forecast Alpha — Production Engine
+# Weather Alpha — Production Engine
 
 Terminal-resident, always-on trading bot for Kalshi `KXHIGHCHI` (KMDW daily-high).
 Ships with the v3 ML model from `notebooks/model_v3.ipynb` (CRPS 1.204 °F, 46 features)
@@ -58,20 +58,20 @@ pip install -e .[data,dev]      # data: herbie/xarray/cfgrib (HRRR); dev: pytest
 
 Validate the install:
 ```powershell
-python -m forecast_alpha --version
-python -c "from forecast_alpha import config, model, strategy, execution, tui; print('ok')"
+python -m weather_alpha --version
+python -c "from weather_alpha import config, model, strategy, execution, tui; print('ok')"
 ```
 
 ---
 
 ## Configure
 
-Single source of truth: [`config/forecast_alpha.yaml`](config/forecast_alpha.yaml).
+Single source of truth: [`config/weather_alpha.yaml`](config/weather_alpha.yaml).
 
 - `mode: paper` is the default and is safe — no orders are submitted to Kalshi.
 - `mode: live` requires `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` in the
   environment (or `.env` — copy from `.env.example`).
-- Override the YAML path with `--config /abs/path.yaml` or `$FORECAST_ALPHA_CONFIG`.
+- Override the YAML path with `--config /abs/path.yaml` or `$WEATHER_ALPHA_CONFIG`.
 
 Key knobs:
 
@@ -93,7 +93,7 @@ Key knobs:
 ### TUI (production / always-on)
 
 ```powershell
-python -m forecast_alpha
+python -m weather_alpha
 ```
 
 Panels:
@@ -116,16 +116,16 @@ Key bindings:
 
 ```powershell
 # One cycle for the latest viable anchor, then exit
-python -m forecast_alpha --headless
+python -m weather_alpha --headless
 
 # One cycle, force a specific anchor date
-python -m forecast_alpha --headless --anchor 2026-05-22
+python -m weather_alpha --headless --anchor 2026-05-22
 
 # Skip the slow IEM + HRRR refresh subprocesses (use existing parquets)
-python -m forecast_alpha --headless --no-refresh
+python -m weather_alpha --headless --no-refresh
 
 # Stay-alive scheduler loop without TUI
-python -m forecast_alpha --headless --loop
+python -m weather_alpha --headless --loop
 ```
 
 ---
@@ -174,7 +174,7 @@ PAPER is the default. The production strategy is **model-free**, so going live i
 - [ ] `strategy.bankroll_usd` is already `25` — your real account. Do not start large.
 - [ ] Set `risk.daily_max_loss_usd` to a number you can lose without flinching; execution
       refuses new entries once daily realized losses exceed it.
-- [ ] Dry-run: `python -m forecast_alpha --headless --no-refresh` and read the log — confirm
+- [ ] Dry-run: `python -m weather_alpha --headless --no-refresh` and read the log — confirm
       the orders that *would* be placed match intuition. (Model-free needs no `--anchor` or
       weather; the anchor is simply today's event date.)
 - [ ] Deploy on an always-on host so the 1 PM anchor fires with your laptop off — see
@@ -184,11 +184,11 @@ PAPER is the default. The production strategy is **model-free**, so going live i
 > no longer apply — `market_wing` is model-free (HANDOFF §1.5), and at $25 this is deliberate
 > low-stakes live-learning.
 
-When those are green, edit `config/forecast_alpha.yaml`:
+When those are green, edit `config/weather_alpha.yaml`:
 ```yaml
 mode: live
 ```
-and `python -m forecast_alpha`. The status bar will show `[LIVE]` in red.
+and `python -m weather_alpha`. The status bar will show `[LIVE]` in red.
 
 **Kill switch — halt at any time, from any terminal:**
 ```powershell
@@ -216,7 +216,7 @@ use the Kalshi UI for that. (The TUI's `k` key writes the same `data/KILL_SWITCH
 | 1 | Anchor lag (IEM ASOS, ~2 days) — **only affects `model.enabled` mode**; the production model-free path uses today's event date. | Obsolete for `market_wing`; adopt Synoptic only if running a model-anchored strategy. |
 | 2 | LIVE mode submits limit orders but doesn't reconcile partial fills via a polling loop. | Add a `kalshi.poll_orders` worker in scheduler before scaling capital. |
 | 3 | LIVE mode treats the limit price as the fill price for accounting. | Use the same poll-orders worker to update fills from `/portfolio/fills`. |
-| 4 | Features come from dynamic-exec of `notebooks/model_v3.ipynb` (fragile if the notebook moves). | Port §3.* cells into `forecast_alpha/features_v3.py` and validate parity. |
+| 4 | Features come from dynamic-exec of `notebooks/model_v3.ipynb` (fragile if the notebook moves). | Port §3.* cells into `weather_alpha/features_v3.py` and validate parity. |
 | 5 | Kalshi WebSocket is not wired (REST polling only). | Add `kalshi.ws` and switch real-time market state to WS feed. |
 | 6 | Regime throttle uses simple thresholds; no learned regime classifier. | Train a regime classifier on `live_log.parquet` once it has ≥ 60 days. |
 
@@ -228,27 +228,27 @@ These are tracked in HANDOFF.md §6 (research-side outstanding work).
 
 | Module | Role |
 |---|---|
-| `forecast_alpha/config.py` | Dataclass config loaded from `config/forecast_alpha.yaml`. |
-| `forecast_alpha/log.py` | Rotating file log + in-memory ring buffer for the TUI. |
-| `forecast_alpha/model.py` | Loads `data/model_v3_artifacts/`, `predict_for_anchor`. |
-| `forecast_alpha/pmf.py` | Quantile→PMF, bucket parsers, KL, market-implied PMF. |
-| `forecast_alpha/features.py` | Dynamic-exec of `model_v3.ipynb` §3.* into a controlled namespace. |
-| `forecast_alpha/data.py` | `refresh_iem`, `refresh_hrrr`, `load_bundle`, `latest_viable_anchor`. |
-| `forecast_alpha/kalshi.py` | Async REST client (public + RSA-PSS-signed endpoints). |
-| `forecast_alpha/fees.py` | Kalshi 7%·N·P·(1−P) fee formula. |
-| `forecast_alpha/strategy.py` | Joint Kelly + KL concentration + regime throttle. |
-| `forecast_alpha/positions.py` | Per-position state + JSON snapshot persistence. |
-| `forecast_alpha/execution.py` | Paper/live fills, risk gates, settlement reconciliation. |
-| `forecast_alpha/live_log.py` | Append rows to `data/live_log.parquet`. |
-| `forecast_alpha/scheduler.py` | Pure-logic scheduler: refresh/anchor/intraday decisions. |
-| `forecast_alpha/engine.py` | `run_cycle` — one full anchor cycle end-to-end. |
-| `forecast_alpha/tui.py` | Textual app — five panels, key bindings, scheduler dispatch. |
-| `forecast_alpha/main.py` | Entry point — TUI by default, `--headless` for one-shot/loop. |
+| `weather_alpha/config.py` | Dataclass config loaded from `config/weather_alpha.yaml`. |
+| `weather_alpha/log.py` | Rotating file log + in-memory ring buffer for the TUI. |
+| `weather_alpha/model.py` | Loads `data/model_v3_artifacts/`, `predict_for_anchor`. |
+| `weather_alpha/pmf.py` | Quantile→PMF, bucket parsers, KL, market-implied PMF. |
+| `weather_alpha/features.py` | Dynamic-exec of `model_v3.ipynb` §3.* into a controlled namespace. |
+| `weather_alpha/data.py` | `refresh_iem`, `refresh_hrrr`, `load_bundle`, `latest_viable_anchor`. |
+| `weather_alpha/kalshi.py` | Async REST client (public + RSA-PSS-signed endpoints). |
+| `weather_alpha/fees.py` | Kalshi 7%·N·P·(1−P) fee formula. |
+| `weather_alpha/strategy.py` | Joint Kelly + KL concentration + regime throttle. |
+| `weather_alpha/positions.py` | Per-position state + JSON snapshot persistence. |
+| `weather_alpha/execution.py` | Paper/live fills, risk gates, settlement reconciliation. |
+| `weather_alpha/live_log.py` | Append rows to `data/live_log.parquet`. |
+| `weather_alpha/scheduler.py` | Pure-logic scheduler: refresh/anchor/intraday decisions. |
+| `weather_alpha/engine.py` | `run_cycle` — one full anchor cycle end-to-end. |
+| `weather_alpha/tui.py` | Textual app — five panels, key bindings, scheduler dispatch. |
+| `weather_alpha/main.py` | Entry point — TUI by default, `--headless` for one-shot/loop. |
 
 Reference notebooks (input to production code, not run by it):
 - `notebooks/model_v3.ipynb` — ★ production model trainer.
 - `notebooks/live_predict.ipynb` — original Jupyter pipeline (replaced by this package).
-- `notebooks/live.ipynb` — fetchers + Kalshi market client (ported to `forecast_alpha/kalshi.py`).
+- `notebooks/live.ipynb` — fetchers + Kalshi market client (ported to `weather_alpha/kalshi.py`).
 - `notebooks/herbie.ipynb` — HRRR exploration / reference.
 
 Existing scripts (still used as subprocesses):

@@ -14,14 +14,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from forecast_alpha.config import Config
-from forecast_alpha.data import DataBundle, latest_viable_anchor, load_bundle, refresh_live
-from forecast_alpha.execution import ExecutionResult, execute, reconcile_settlements
-from forecast_alpha.features import build_features
-from forecast_alpha.kalshi import KalshiClient
-from forecast_alpha.model import ModelArtifacts, Prediction, predict_for_anchor
-from forecast_alpha.positions import Book
-from forecast_alpha.strategy import StrategyOutput, run_strategy, run_wing_strategy
+from weather_alpha.config import Config
+from weather_alpha.data import DataBundle, latest_viable_anchor, load_bundle, refresh_live
+from weather_alpha.execution import ExecutionResult, execute, reconcile_settlements
+from weather_alpha.features import build_features
+from weather_alpha.kalshi import KalshiClient
+from weather_alpha.model import ModelArtifacts, Prediction, predict_for_anchor
+from weather_alpha.positions import Book
+from weather_alpha.strategy import StrategyOutput, run_strategy, run_wing_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,7 @@ async def run_cycle(
     realized = reconcile_settlements(book, bundle.cli)
     if realized:
         logger.info("settled positions realized %+d¢ this cycle", realized)
+        await _resync_bankroll_after_settlement(cfg, book, kalshi)
         book.save(cfg.paths.positions_snapshot)
 
     return CycleResult(
@@ -152,10 +153,56 @@ def _dispatch_strategy(cfg: Config, pred, contracts, feature_row, bankroll: floa
 
 
 def _current_bankroll(cfg: Config, book: Book) -> float:
-    """Effective bankroll = starting bankroll + realized PnL − fees paid (paper).
+    """Effective bankroll for sizing + exposure caps.
 
-    In LIVE mode we'd query Kalshi's /portfolio/balance; for v1 we keep symmetry
-    with paper math so behavior is identical across modes.
+    LIVE: the real Kalshi cash balance, verified at activation and re-synced after
+    each settlement (`book.bankroll_cents`; see `verify_bankroll`). The configured
+    `bankroll_usd` is only a hint in LIVE.
+    PAPER: starting bankroll + realized PnL − fees paid (no exchange to query).
     """
+    if cfg.is_live() and book.bankroll_cents is not None:
+        return max(0.0, book.bankroll_cents / 100.0)
     realized = book.realized_pnl_cents - book.fees_paid_cents
     return max(0.0, cfg.strategy.bankroll_usd + realized / 100.0)
+
+
+async def verify_bankroll(cfg: Config, book: Book, client: KalshiClient) -> None:
+    """Verify the running bankroll from the exchange when LIVE is activated.
+
+    Reads Kalshi's real cash balance and adopts it as the authoritative bankroll
+    (`book.bankroll_cents`) for all sizing/exposure caps — the configured
+    `bankroll_usd` is only a hint. A zero balance is surfaced loudly and yields
+    bankroll 0, so sizing emits no trades (a soft funding gate that never crashes
+    startup). PAPER is a no-op: `_current_bankroll` computes it from realized PnL.
+    """
+    if not cfg.is_live():
+        return
+    cfg_hint_cents = int(round(cfg.strategy.bankroll_usd * 100))
+    bal = await client.get_balance()
+    prev = book.bankroll_cents
+    book.bankroll_cents = max(0, bal)
+    book.save(cfg.paths.positions_snapshot)
+    logger.info("LIVE bankroll verified from Kalshi: $%.2f (config hint $%.2f%s)",
+                bal / 100.0, cfg_hint_cents / 100.0,
+                "" if prev is None else f", prev tracked ${prev / 100:.2f}")
+    if bal <= 0:
+        logger.critical("LIVE balance is $%.2f — sizing will emit NO trades until the "
+                        "account is funded.", bal / 100.0)
+    elif cfg_hint_cents and abs(bal - cfg_hint_cents) > cfg_hint_cents:
+        logger.warning("LIVE balance $%.2f differs sharply from config bankroll $%.2f — "
+                       "confirm the correct account/credentials.",
+                       bal / 100.0, cfg_hint_cents / 100.0)
+
+
+async def _resync_bankroll_after_settlement(cfg: Config, book: Book, client: KalshiClient) -> None:
+    """Update the running bankroll after settlements realize PnL. LIVE re-queries the
+    real Kalshi balance (authoritative); PAPER needs nothing — `_current_bankroll`
+    already reflects the realized PnL. A balance-fetch failure never aborts the cycle."""
+    if not cfg.is_live():
+        return
+    try:
+        bal = await client.get_balance()
+        book.bankroll_cents = max(0, bal)
+        logger.info("LIVE bankroll re-synced after settlement: $%.2f", bal / 100.0)
+    except Exception:
+        logger.exception("post-settlement balance refresh failed; keeping prior bankroll")

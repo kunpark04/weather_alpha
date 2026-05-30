@@ -54,7 +54,7 @@ def setup_logging(logs_dir: Path, level: int = logging.INFO) -> None:
     fmt = logging.Formatter(_FMT, datefmt=_DATEFMT)
 
     fh = logging.handlers.RotatingFileHandler(
-        logs_dir / "forecast_alpha.log",
+        logs_dir / "weather_alpha.log",
         maxBytes=10 * 1024 * 1024,
         backupCount=5,
         encoding="utf-8",

@@ -25,13 +25,13 @@ from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 
-from forecast_alpha.config import Config
-from forecast_alpha.engine import CycleResult, refresh_data, run_cycle
-from forecast_alpha.kalshi import KalshiClient
-from forecast_alpha.log import get_ring_buffer
-from forecast_alpha.model import ModelArtifacts
-from forecast_alpha.positions import Book
-from forecast_alpha.scheduler import Action, Scheduler
+from weather_alpha.config import Config
+from weather_alpha.engine import CycleResult, _current_bankroll, refresh_data, run_cycle, verify_bankroll
+from weather_alpha.kalshi import KalshiClient
+from weather_alpha.log import get_ring_buffer
+from weather_alpha.model import ModelArtifacts
+from weather_alpha.positions import Book
+from weather_alpha.scheduler import Action, Scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class StatusBar(Static):
     def render(self) -> Text:
         color = "red" if self.mode == "live" else "green"
         return Text.assemble(
-            ("Forecast Alpha  ", "bold"),
+            ("Weather Alpha  ", "bold"),
             (f"[{self.mode.upper()}]  ", color),
             (f"anchor={self.anchor}  ", "yellow"),
             (f"bankroll=${self.bankroll:.2f}  ", ""),
@@ -57,7 +57,7 @@ class StatusBar(Static):
         )
 
 
-class ForecastAlphaApp(App):
+class WeatherAlphaApp(App):
     CSS = """
     Screen { layout: vertical; }
     #top { height: 3; }
@@ -105,10 +105,14 @@ class ForecastAlphaApp(App):
     # ---- lifecycle ------------------------------------------------------------
 
     async def on_mount(self) -> None:
-        self.title = f"Forecast Alpha — {self._cfg.station}"
+        self.title = f"Weather Alpha — {self._cfg.station}"
         self._setup_tables()
         self._kalshi = KalshiClient(self._cfg.kalshi, authenticated=self._cfg.is_live())
         await self._kalshi.__aenter__()
+        try:
+            await verify_bankroll(self._cfg, self._book, self._kalshi)
+        except Exception:
+            logger.exception("LIVE bankroll verification failed at startup")
 
         self._refresh_status()
         self._drain_log()
@@ -128,8 +132,7 @@ class ForecastAlphaApp(App):
     def _refresh_status(self) -> None:
         bar = self.query_one(StatusBar)
         bar.mode = self._cfg.mode
-        bar.bankroll = max(0.0, self._cfg.strategy.bankroll_usd
-                           + (self._book.realized_pnl_cents - self._book.fees_paid_cents) / 100.0)
+        bar.bankroll = _current_bankroll(self._cfg, self._book)
         bar.realized = self._book.realized_pnl_cents
         td = self._scheduler.next_anchor_in()
         bar.next_event = _fmt_delta(td)

@@ -11,7 +11,7 @@ against the live account while still in paper mode, before flipping mode: live.
 
 Usage (PowerShell):
     $env:KALSHI_KEY_ID = "<your-access-key-id>"
-    $env:KALSHI_PRIVATE_KEY_PATH = "forecast_alpha/kalshi.pem"
+    $env:KALSHI_PRIVATE_KEY_PATH = "weather_alpha/kalshi.pem"
     python scripts/check_kalshi_auth.py
 """
 
@@ -27,8 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd  # noqa: E402
 
-from forecast_alpha.config import load_config  # noqa: E402
-from forecast_alpha.kalshi import KalshiClient  # noqa: E402
+from weather_alpha.config import load_config  # noqa: E402
+from weather_alpha.kalshi import KalshiClient  # noqa: E402
 
 
 async def _amain() -> int:

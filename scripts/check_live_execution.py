@@ -7,7 +7,7 @@ Asserts:
   - full fill  -> Book records the ACTUAL filled count at the observed avg price (C1)
   - no fill    -> nothing booked (no phantom position); leg retriable next cycle (C1)
   - partial    -> Book records only what filled (C1)
-  - client_order_id is deterministic: f"fa-{anchor}-{ticker}-{side}" (C4)
+  - client_order_id is deterministic: f"wa-{anchor}-{ticker}-{side}" (C4)
   - intraday outlay over daily_max_loss_usd -> halt before placing (C3)
 """
 from __future__ import annotations
@@ -23,12 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd  # noqa: E402
 
-from forecast_alpha.config import load_config  # noqa: E402
-from forecast_alpha.execution import execute  # noqa: E402
-from forecast_alpha.kalshi import KalshiContract, KalshiPosition  # noqa: E402
-from forecast_alpha.model import Prediction  # noqa: E402
-from forecast_alpha.positions import Book  # noqa: E402
-from forecast_alpha.strategy import StrategyOutput, TargetPosition  # noqa: E402
+from weather_alpha.config import load_config  # noqa: E402
+from weather_alpha.execution import execute  # noqa: E402
+from weather_alpha.kalshi import KalshiContract, KalshiPosition  # noqa: E402
+from weather_alpha.model import Prediction  # noqa: E402
+from weather_alpha.positions import Book  # noqa: E402
+from weather_alpha.strategy import StrategyOutput, TargetPosition  # noqa: E402
 
 
 def _contract(ticker: str, ask: float) -> KalshiContract:
@@ -102,7 +102,7 @@ def main() -> int:
 
     # 1. Full fill: before 0, after 3 -> book 3.
     res, held, coid = asyncio.run(_run(0, 3, target=3))
-    exp_coid = "fa-2026-05-30-KX-T-yes"
+    exp_coid = "wa-2026-05-30-KX-T-yes"
     t1 = held == 3 and res.fills == 1 and coid == exp_coid
     print(f"[full]    booked={held} fills={res.fills} coid={coid}  -> {'PASS' if t1 else 'FAIL'}")
     ok &= t1

@@ -27,8 +27,8 @@ import pandas as pd
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from forecast_alpha.config import KalshiCfg
-from forecast_alpha.pmf import parse_kalshi_subtitle
+from weather_alpha.config import KalshiCfg
+from weather_alpha.pmf import parse_kalshi_subtitle
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class KalshiClient:
         self._http = httpx.AsyncClient(
             base_url=cfg.api_base,
             timeout=cfg.request_timeout_seconds,
-            headers={"User-Agent": "forecast-alpha/0.1"},
+            headers={"User-Agent": "weather-alpha/0.1"},
         )
         if authenticated:
             key_id = os.environ.get(cfg.key_id_env, "")
@@ -207,7 +207,7 @@ class KalshiClient:
             "type": "limit",
             "yes_price": int(limit_price_cents) if side == "yes" else None,
             "no_price":  int(limit_price_cents) if side == "no"  else None,
-            "client_order_id": client_order_id or f"fa-{int(time.time() * 1000)}",
+            "client_order_id": client_order_id or f"wa-{int(time.time() * 1000)}",
         }
         payload = {k: v for k, v in payload.items() if v is not None}
         logger.info("Kalshi place_order %s %s %s x %d @ %d¢", action, side, ticker,

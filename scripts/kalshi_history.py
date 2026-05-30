@@ -25,7 +25,7 @@ import pandas as pd
 import requests
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
-USER_AGENT = "forecast-alpha-backtest/0.1"
+USER_AGENT = "weather-alpha-backtest/0.1"
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUT_PATH = _PROJECT_ROOT / "data" / "kalshi_history.parquet"

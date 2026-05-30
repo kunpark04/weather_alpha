@@ -21,8 +21,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from forecast_alpha.data import DataBundle
-from forecast_alpha.model import ModelArtifacts
+from weather_alpha.data import DataBundle
+from weather_alpha.model import ModelArtifacts
 
 logger = logging.getLogger(__name__)
 

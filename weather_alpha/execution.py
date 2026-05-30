@@ -23,13 +23,13 @@ from typing import Iterable
 
 import pandas as pd
 
-from forecast_alpha.config import Config
-from forecast_alpha.fees import trade_fee_cents
-from forecast_alpha.kalshi import KalshiClient, KalshiContract
-from forecast_alpha.live_log import LogRow, append_rows
-from forecast_alpha.model import Prediction
-from forecast_alpha.positions import Book
-from forecast_alpha.strategy import StrategyOutput, TargetPosition
+from weather_alpha.config import Config
+from weather_alpha.fees import trade_fee_cents
+from weather_alpha.kalshi import KalshiClient, KalshiContract
+from weather_alpha.live_log import LogRow, append_rows
+from weather_alpha.model import Prediction
+from weather_alpha.positions import Book
+from weather_alpha.strategy import StrategyOutput, TargetPosition
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ async def _execute_one(cfg: Config, c: KalshiContract, tgt: TargetPosition,
         # C4 — deterministic idempotency key: the same logical leg on the same anchor
         # date always yields the same client_order_id, so a retry or a re-run of the
         # cycle collides on Kalshi's uniqueness check instead of doubling the position.
-        coid = f"fa-{anchor_date}-{tgt.ticker}-{tgt.side}"
+        coid = f"wa-{anchor_date}-{tgt.ticker}-{tgt.side}"
         # Snapshot true exchange holdings BEFORE the order so we can measure the real fill.
         before_qty, _ = await _live_held(client, tgt.ticker, tgt.side)
         ack = await client.place_order(
@@ -400,7 +400,7 @@ def reconcile_settlements(book: Book, cli_df: pd.DataFrame) -> int:
         if d not in truth_by_date:
             continue
         actual = truth_by_date[d]
-        from forecast_alpha.pmf import parse_bucket
+        from weather_alpha.pmf import parse_bucket
         pred, _ = parse_bucket(p.bucket_spec)
         bucket_wins = pred(actual)
         won = (p.side == "yes" and bucket_wins) or (p.side == "no" and not bucket_wins)

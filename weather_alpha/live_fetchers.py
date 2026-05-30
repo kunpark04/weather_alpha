@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 WEATHER_GOV = "https://api.weather.gov"
 SYNOPTIC_API = "https://api.synopticdata.com/v2/stations/timeseries"
-USER_AGENT = "forecast-alpha/0.1 (kunpark04@gmail.com)"
+USER_AGENT = "weather-alpha/0.1 (kunpark04@gmail.com)"
 
 
 # ---------------------------------------------------------------------------

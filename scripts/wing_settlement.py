@@ -25,7 +25,7 @@ import pandas as pd
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
-from forecast_alpha.pmf import parse_bucket, parse_kalshi_subtitle, bucket_prob
+from weather_alpha.pmf import parse_bucket, parse_kalshi_subtitle, bucket_prob
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")

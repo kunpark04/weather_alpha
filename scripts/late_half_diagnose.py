@@ -10,7 +10,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from forecast_alpha.pmf import parse_bucket, parse_kalshi_subtitle, bucket_lower_bound, bucket_prob
+from weather_alpha.pmf import parse_bucket, parse_kalshi_subtitle, bucket_lower_bound, bucket_prob
 
 pos = pd.read_parquet(_ROOT / "data/oos_full_positions.parquet")
 pos["date"] = pd.to_datetime(pos["date"]).dt.normalize()

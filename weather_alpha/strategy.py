@@ -42,11 +42,11 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from forecast_alpha.config import StrategyCfg
-from forecast_alpha.fees import net_ev_cents, trade_fee_cents
-from forecast_alpha.kalshi import KalshiContract
-from forecast_alpha.model import Prediction
-from forecast_alpha.pmf import MarketBucket, kl_per_bucket, market_implied_pmf
+from weather_alpha.config import StrategyCfg
+from weather_alpha.fees import net_ev_cents, trade_fee_cents
+from weather_alpha.kalshi import KalshiContract
+from weather_alpha.model import Prediction
+from weather_alpha.pmf import MarketBucket, kl_per_bucket, market_implied_pmf
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +188,7 @@ class _Candidate:
 
 def _market_buckets(contracts: list[KalshiContract], pred: Prediction) -> list[MarketBucket]:
     """Project Prediction.pmf onto each contract's bucket spec to get p_model per bucket."""
-    from forecast_alpha.pmf import bucket_prob
+    from weather_alpha.pmf import bucket_prob
     out: list[MarketBucket] = []
     pmf_vals = pred.pmf.values
     for c in contracts:
@@ -287,7 +287,7 @@ def run_two_bucket_arbitrage(
     if len(live) < 2:
         return StrategyOutput(targets=[], diagnostics={"reason": "fewer than 2 live contracts"})
 
-    from forecast_alpha.pmf import bucket_lower_bound, bucket_prob, smooth_pmf
+    from weather_alpha.pmf import bucket_lower_bound, bucket_prob, smooth_pmf
 
     # Tier 1.3: optionally smooth the PMF before bucketing (kills quantile artifacts).
     pmf_values = prediction.pmf.values
@@ -474,7 +474,7 @@ def run_wing_strategy(
     Sizing: equal-payout (K*ask per leg) by default - whichever leg wins pays
     the same gross. Kelly on the binary "in wing or not" bet.
     """
-    from forecast_alpha.pmf import bucket_lower_bound, bucket_prob
+    from weather_alpha.pmf import bucket_lower_bound, bucket_prob
 
     live = [c for c in contracts if c.is_live]
     if len(live) < 3:
@@ -666,7 +666,7 @@ def run_wing_strategy(
     # Fee-aware gate (small accounts): skip if Kalshi fees would eat the entire win even
     # on the best-case leg — i.e. the trade cannot profit on any outcome.
     if fee_aware and targets:
-        from forecast_alpha.fees import trade_fee_cents
+        from weather_alpha.fees import trade_fee_cents
         total_fee_c = sum(trade_fee_cents(t.limit_price_cents / 100.0, t.target_contracts) for t in targets)
         total_cost_c = sum(t.target_contracts * t.limit_price_cents for t in targets)
         best_win_payout_c = max(t.target_contracts for t in targets) * 100
@@ -712,7 +712,7 @@ def run_hard_floor_strategy(
     on certain outcomes, which has unacceptable concentration risk despite
     being correct probabilistically).
     """
-    from forecast_alpha.pmf import bucket_upper_bound
+    from weather_alpha.pmf import bucket_upper_bound
 
     if feature_row is None:
         return StrategyOutput(targets=[], diagnostics={"reason": "no feature_row"})
@@ -797,7 +797,7 @@ def run_variance_strategy(
     when the aggregate distribution shape differs, and trades the wings
     against the body as a structured spread.
     """
-    from forecast_alpha.pmf import bucket_midpoint, bucket_prob
+    from weather_alpha.pmf import bucket_midpoint, bucket_prob
 
     live = [c for c in contracts if c.is_live]
     if len(live) < 4:
@@ -929,7 +929,7 @@ def run_tail_probability_strategy(
     entirely — that's where market is most efficient. Targets the model's
     documented strength: tail probability calibration via climatology + hard floor.
     """
-    from forecast_alpha.pmf import bucket_prob
+    from weather_alpha.pmf import bucket_prob
 
     live = [c for c in contracts if c.is_live]
     if not live:
@@ -1021,7 +1021,7 @@ def run_hrrr_bias_strategy(
     raw HRRR (= traders/algos using HRRR without bias correction) and the model
     says "actually 2°F warmer", that's a specific, replicable edge.
     """
-    from forecast_alpha.pmf import bucket_prob
+    from weather_alpha.pmf import bucket_prob
 
     if feature_row is None:
         return StrategyOutput(targets=[], diagnostics={"reason": "no feature_row"})

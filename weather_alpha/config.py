@@ -10,7 +10,7 @@ from typing import Literal
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "forecast_alpha.yaml"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "weather_alpha.yaml"
 
 
 Mode = Literal["paper", "live"]
@@ -157,9 +157,9 @@ def _abs(path_str: str) -> Path:
 
 
 def load_config(path: Path | str | None = None) -> Config:
-    """Load YAML config. Resolution order: arg > $FORECAST_ALPHA_CONFIG > default."""
+    """Load YAML config. Resolution order: arg > $WEATHER_ALPHA_CONFIG > default."""
     if path is None:
-        env = os.environ.get("FORECAST_ALPHA_CONFIG")
+        env = os.environ.get("WEATHER_ALPHA_CONFIG")
         path = Path(env) if env else DEFAULT_CONFIG_PATH
     path = Path(path)
     if not path.exists():

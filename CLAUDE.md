@@ -1,4 +1,4 @@
-# CLAUDE.md — Forecast Alpha project guide
+# CLAUDE.md — Weather Alpha project guide
 
 Architectural and behavioral guide for Claude working in this repo. Detailed
 results, retrain steps, and reproducible-command snippets live in [`HANDOFF.md`](HANDOFF.md).
@@ -25,7 +25,7 @@ notebooks/model_v3.ipynb            <-- model R&D, retraining, calibration
 data/model_v3_artifacts/
         |
         v  loaded by
-forecast_alpha/                     <-- production package (always-on bot)
+weather_alpha/                     <-- production package (always-on bot)
    model.py        Prediction dataclass + artifact loader
    pmf.py          PMF utilities, bucket parsing, rearrangement
    kalshi.py      KalshiContract dataclass, status filter
@@ -40,11 +40,11 @@ forecast_alpha/                     <-- production package (always-on bot)
    main.py        entry point
         |
         v  driven by
-config/forecast_alpha.yaml          <-- persistent knobs (bankroll, kelly, throttle)
+config/weather_alpha.yaml          <-- persistent knobs (bankroll, kelly, throttle)
 ```
 
 Three orthogonal layers: **model** (notebook + artifacts), **strategy/execution**
-(`forecast_alpha/`), **config** (YAML). Strategies are pure functions of
+(`weather_alpha/`), **config** (YAML). Strategies are pure functions of
 `(StrategyCfg, Prediction, contracts, feature_row, bankroll)` → `StrategyOutput`.
 
 ---
@@ -102,14 +102,14 @@ Three orthogonal layers: **model** (notebook + artifacts), **strategy/execution*
 
 ## 5. Conventions
 
-- **Working directory** is the project root (`forecast-alpha/`). All relative paths
+- **Working directory** is the project root (`weather-alpha/`). All relative paths
   in scripts assume this.
 - **Times** are tz-aware. Local = `America/Chicago`. Anchor = 1 PM local
   = `13:00 CT` = `18:00 UTC` (CST) / `19:00 UTC` (CDT).
 - **Units** are °F throughout (model + features + truth). Internal HRRR data was
   K originally; conversion happens once in `model_v3.ipynb` §3.
 - **Bucket spec strings:** `"72-73"` (inclusive range), `"<=71"` (lower tail),
-  `">=80"` (upper tail). Parsed by `forecast_alpha/pmf.py:parse_kalshi_subtitle`.
+  `">=80"` (upper tail). Parsed by `weather_alpha/pmf.py:parse_kalshi_subtitle`.
 - **Strategy CLI flags** use `--wing-*` prefix and kebab-case (e.g. `--wing-drop-lower-ask`).
 - **Diagnostic field names** in strategy output: `sum_asks`, `p_top_wing`, `p_used`,
   `ev_margin`, `agreement`, `wing_anchor`, etc. (post-rename, no legacy `_3` suffixes).
@@ -148,7 +148,7 @@ On 67-day Kalshi window (2026-03-21 → 2026-05-26), $1000 starting bankroll, qu
   - `scripts/all_variants_retest.py` — full variant comparison
   - `scripts/verify_bucket_accuracy.py` — bucket-level model vs market accuracy
   - `scripts/sizing_breakdown.py` — per-day stake decomposition
-- **Modify `forecast_alpha/strategy.py` only with intent.** Function signatures
+- **Modify `weather_alpha/strategy.py` only with intent.** Function signatures
   are stable (named kwargs, no positional args after `*`). Renames cascade to
   `scripts/backtest_strategy.py` CLI flags and to 5+ analysis scripts.
 - **The notebook `model_v3.ipynb` is the single source of truth for retraining.**
@@ -165,12 +165,12 @@ Every md file that governs how this project is worked on:
 |---|---|
 | [`README.md`](README.md) | Project entry point — current state, folder overview, quick start |
 | [`HANDOFF.md`](HANDOFF.md) | Durable hand-off — full result tables, sizing pipeline, open items, reproducible commands |
-| [`README_PROD.md`](README_PROD.md) | Production engine (`forecast_alpha/`) architecture, paper-mode setup, going-live checklist |
+| [`README_PROD.md`](README_PROD.md) | Production engine (`weather_alpha/`) architecture, paper-mode setup, going-live checklist |
 | [`Language and Architecture Choices for a Production-Grade Kalshi Trading Bot in the Terminal.md`](Language%20and%20Architecture%20Choices%20for%20a%20Production-Grade%20Kalshi%20Trading%20Bot%20in%20the%20Terminal.md) | Research doc — Python/C++/Rust/Go trade-offs, TUI framework choices, Kalshi SDK landscape |
 | `notebooks/model_v3.ipynb` | Production model notebook — features, CV, calibration, §10.3 Kalshi-resolution diagnostic |
 | `notebooks/model_v4.ipynb` | Parallel R&D variant — midnight anchor (NOT production) |
 | `notebooks/live_predict.ipynb` | Live prediction pipeline (loads v3 artifacts) |
-| `config/forecast_alpha.yaml` | Persistent strategy/risk config |
+| `config/weather_alpha.yaml` | Persistent strategy/risk config |
 | [`deploy/README.md`](deploy/README.md) | Always-on deployment guide — orderbook-logger systemd unit + hosting options |
 | [`tasks/lessons.md`](tasks/lessons.md) | Self-improvement log — recurring-mistake patterns + prevention rules |
 

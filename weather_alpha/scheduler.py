@@ -19,7 +19,7 @@ from enum import Enum
 
 import pandas as pd
 
-from forecast_alpha.config import Config
+from weather_alpha.config import Config
 
 logger = logging.getLogger(__name__)
 

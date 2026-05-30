@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover
 
 BASE = "https://api.elections.kalshi.com/trade-api/v2"
 SERIES = "KXHIGHCHI"
-UA = {"User-Agent": "forecast-alpha-orderbook-logger/1.0", "Accept": "application/json"}
+UA = {"User-Agent": "weather-alpha-orderbook-logger/1.0", "Accept": "application/json"}
 
 log = logging.getLogger("orderbook_logger")
 _STOP = False

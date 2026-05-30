@@ -7,6 +7,7 @@ or a test harness without modification.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,7 +20,9 @@ from weather_alpha.data import DataBundle, latest_viable_anchor, load_bundle, re
 from weather_alpha.execution import ExecutionResult, execute, reconcile_settlements
 from weather_alpha.features import build_features
 from weather_alpha.kalshi import KalshiClient
+from weather_alpha.live_fetchers import fetch_live_cli
 from weather_alpha.model import ModelArtifacts, Prediction, predict_for_anchor
+from weather_alpha.pmf import INTEGER_F_GRID
 from weather_alpha.positions import Book
 from weather_alpha.strategy import StrategyOutput, run_strategy, run_wing_strategy
 
@@ -43,7 +46,14 @@ async def refresh_data(cfg: Config, anchor_dt_local: pd.Timestamp | None = None)
 
     Replaces the old subprocess wrappers. Wall time ~3–5 s vs ~30–90 s before.
     Anchor defaults to "now" — HRRR auto-picks the latest safely-published init.
+
+    Model-free strategies use no weather inputs, so this is a no-op when model.enabled
+    is false: the only data a model-free run needs is the CLI high, pulled on demand at
+    settlement (see settle_if_due). Never imports herbie in this mode.
     """
+    if not cfg.model.enabled:
+        logger.debug("model-free: skipping weather refresh (CLI is pulled on demand at settlement)")
+        return {}
     if anchor_dt_local is None:
         anchor_dt_local = pd.Timestamp.now(tz=cfg.local_tz)
     return await refresh_live(
@@ -58,7 +68,7 @@ async def refresh_data(cfg: Config, anchor_dt_local: pd.Timestamp | None = None)
 
 async def run_cycle(
     cfg: Config,
-    art: ModelArtifacts,
+    art: ModelArtifacts | None,
     book: Book,
     kalshi: KalshiClient,
     *,
@@ -67,6 +77,8 @@ async def run_cycle(
 ) -> CycleResult:
     """Run one anchor cycle: predict → strategize → execute → settle reconcile."""
     if cfg.model.enabled:
+        if art is None:
+            raise RuntimeError("model.enabled=true but no model artifacts were loaded — check model_dir")
         if not skip_refresh:
             await refresh_data(cfg, anchor_dt_local=force_anchor)
         bundle = load_bundle(cfg.paths.data_dir, cfg.station)
@@ -79,13 +91,13 @@ async def run_cycle(
         logger.info("cycle: anchor=%s mode=%s  median=%d°F  80%% CI=[%d,%d]°F  peak=%d°F (P=%.3f)",
                     anchor.date(), cfg.mode, pred.median, pred.lo10, pred.hi90, pred.peak_F, pred.peak_P)
     else:
-        # Model-free path: a market-anchored strategy (market_wing) ignores the model,
-        # so skip weather refresh / feature build / prediction entirely. CLI is still
-        # loaded for settlement reconciliation; the anchor is simply today's event date.
-        bundle = load_bundle(cfg.paths.data_dir, cfg.station)
+        # Model-free path: a market-anchored strategy (market_wing) uses neither the model
+        # nor weather inputs, so we load NO data bundle and fetch no weather. The anchor is
+        # simply today's event date; settlement pulls the CLI high on demand (settle_if_due)
+        # only when a prior-day position is still open.
         local_today = pd.Timestamp.now(tz=cfg.local_tz).normalize().tz_localize(None)
         anchor = force_anchor.normalize() if force_anchor is not None else local_today
-        pred = _placeholder_prediction(art, anchor)
+        pred = _placeholder_prediction(cfg, anchor)
         feature_row = None
         logger.info("cycle (model-free): anchor=%s mode=%s", anchor.date(), cfg.mode)
 
@@ -104,7 +116,12 @@ async def run_cycle(
 
     exec_result = await execute(cfg, pred, contracts, strat, book, kalshi if cfg.is_live() else None)
 
-    realized = reconcile_settlements(book, bundle.cli)
+    # Settlement: model-enabled reconciles against the freshly-refreshed bundle CLI;
+    # model-free pulls the CLI high on demand only when a prior-day position is pending.
+    if cfg.model.enabled:
+        realized = reconcile_settlements(book, bundle.cli)
+    else:
+        realized = await settle_if_due(cfg, book)
     if realized:
         logger.info("settled positions realized %+d¢ this cycle", realized)
         await _resync_bankroll_after_settlement(cfg, book, kalshi)
@@ -126,13 +143,14 @@ async def run_cycle(
     )
 
 
-def _placeholder_prediction(art: ModelArtifacts, anchor: pd.Timestamp) -> Prediction:
+def _placeholder_prediction(cfg: Config, anchor: pd.Timestamp) -> Prediction:
     """No-information uniform PMF for the model-free path. market_wing ignores it for
-    decisions (anchor=market, p_used=assumed_win_prob); only diagnostics touch pred.pmf."""
-    grid = art.integer_f_grid
+    decisions (anchor=market, p_used=assumed_win_prob); only diagnostics touch pred.pmf.
+    Built from the canonical integer-°F grid so the model-free path loads NO artifacts."""
+    grid = INTEGER_F_GRID
     p = np.full(len(grid), 1.0 / len(grid))
     return Prediction(
-        date=anchor, model=f"{art.name}/model-free",
+        date=anchor, model=f"{cfg.model.name}/model-free",
         pmf=pd.Series(p, index=grid, name="P"),
         median=int(grid[len(grid) // 2]),
         lo10=int(grid[len(grid) // 10]), hi90=int(grid[9 * len(grid) // 10]),
@@ -238,3 +256,48 @@ async def _resync_bankroll_after_settlement(cfg: Config, book: Book, client: Kal
         logger.info("LIVE bankroll re-synced after settlement: $%.2f", bal / 100.0)
     except Exception:
         logger.exception("post-settlement balance refresh failed; keeping prior bankroll")
+
+
+async def settle_if_due(cfg: Config, book: Book) -> int:
+    """Model-free settlement. Fetch the CLI daily-high table on demand ONLY when a
+    prior-day position is still open (anchor_date < today, local) — then reconcile.
+    Returns newly realized cents. No weather pull on days with nothing to settle; if the
+    CLI truth hasn't landed yet it settles nothing and retries next cycle. This is the
+    *only* data a model-free run fetches beyond the Kalshi market itself."""
+    today = pd.Timestamp.now(tz=cfg.local_tz).normalize().date()
+    has_pending = any(not p.settled and pd.Timestamp(p.anchor_date).date() < today
+                      for p in book.positions.values())
+    if not has_pending:
+        return 0
+    cli_df = await asyncio.to_thread(fetch_live_cli, cfg.station, days_back=cfg.data.cli_days_back)
+    return reconcile_settlements(book, cli_df)
+
+
+async def preflight(cfg: Config, book: Book, client: KalshiClient) -> None:
+    """Read-only activation snapshot — wallet, open exchange positions, today's market, and
+    the active strategy. Logs a summary + gentle warnings; never places or modifies anything,
+    and does NOT reconcile the Book to the exchange (that is a separate, dedicated step)."""
+    await verify_bankroll(cfg, book, client)
+    s = cfg.strategy
+    logger.info("preflight: strategy=%s model_enabled=%s flat_usd=%s max_ask_sum=%s bankroll=$%.2f",
+                s.name, cfg.model.enabled, s.wing.flat_usd, s.wing.max_ask_sum, _current_bankroll(cfg, book))
+    if cfg.is_live():
+        try:
+            positions = await client.get_positions()
+            logger.info("preflight: %d open exchange position(s)", len(positions))
+            for p in positions:
+                held = book.open_for(p.ticker, p.side)
+                book_qty = held.contracts if (held and not held.settled) else 0
+                flag = "" if book_qty == p.contracts else f"  [local Book={book_qty}; reconcile pending]"
+                logger.info("  %s %s x%d @ %d¢%s", p.ticker, p.side, p.contracts, p.avg_price_cents, flag)
+        except Exception:
+            logger.exception("preflight: get_positions failed (continuing)")
+    try:
+        today = pd.Timestamp.now(tz=cfg.local_tz).normalize().tz_localize(None)
+        contracts = await client.fetch_event(today, cfg.execution.market_event_pattern)
+        live = [c for c in contracts if c.is_live]
+        logger.info("preflight: %s event — %d contracts (%d live)", today.date(), len(contracts), len(live))
+        if not live:
+            logger.warning("preflight: no live contracts for today's event — engine will no-trade until it opens")
+    except Exception:
+        logger.exception("preflight: market fetch failed (continuing)")

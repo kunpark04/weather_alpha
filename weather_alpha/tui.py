@@ -73,7 +73,7 @@ class WeatherAlphaApp(App):
         ("k", "kill_switch", "Kill switch"),
     ]
 
-    def __init__(self, cfg: Config, art: ModelArtifacts, book: Book) -> None:
+    def __init__(self, cfg: Config, art: ModelArtifacts | None, book: Book) -> None:
         super().__init__()
         self._cfg = cfg
         self._art = art

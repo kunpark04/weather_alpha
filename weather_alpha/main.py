@@ -19,7 +19,7 @@ import pandas as pd
 
 from weather_alpha import __version__
 from weather_alpha.config import load_config
-from weather_alpha.engine import refresh_data, run_cycle, verify_bankroll
+from weather_alpha.engine import preflight, refresh_data, run_cycle
 from weather_alpha.kalshi import KalshiClient
 from weather_alpha.log import setup_logging
 from weather_alpha.model import load_artifacts
@@ -46,7 +46,11 @@ def run(argv: list[str] | None = None) -> int:
     setup_logging(cfg.paths.logs_dir)
     logger.info("weather-alpha v%s starting in %s mode", __version__, cfg.mode.upper())
 
-    art = load_artifacts(cfg.paths.model_dir)
+    # Model-free strategies (market_wing) never touch the model, so require NO artifacts on
+    # disk — the live host needs zero model data. Load only when the model is actually enabled.
+    art = load_artifacts(cfg.paths.model_dir) if cfg.model.enabled else None
+    if art is None:
+        logger.info("model-free mode (model.enabled=false): skipping artifact load")
     book = Book.load(cfg.paths.positions_snapshot)
     logger.info("loaded book: %d open / %d total positions, realized=%+d¢",
                 sum(1 for p in book.positions.values() if not p.settled),
@@ -76,8 +80,8 @@ async def _run_headless(cfg, art, book, args) -> int:
     force_anchor = pd.Timestamp(args.anchor).normalize() if args.anchor else None
 
     async with KalshiClient(cfg.kalshi, authenticated=cfg.is_live()) as kalshi:
-        # Verify the bankroll against the real account before the first LIVE trade.
-        await verify_bankroll(cfg, book, kalshi)
+        # Activation preflight (read-only): wallet, open positions, today's market, strategy.
+        await preflight(cfg, book, kalshi)
         if not args.loop:
             result = await run_cycle(cfg, art, book, kalshi,
                                      force_anchor=force_anchor,

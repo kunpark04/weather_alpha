@@ -26,10 +26,11 @@ dependencies = [
     "rich>=13.7",
     "metar>=1.11",
     "python-dateutil>=2.9",
+    "requests>=2.31",            # live_fetchers METAR/TAF/ASOS/CLI — core (incl. model-free settlement)
 ]
 
 [project.optional-dependencies]
-data = ["herbie-data>=2024.5", "xarray>=2024.3", "cfgrib>=0.9", "requests>=2.31"]
+data = ["herbie-data>=2024.5", "xarray>=2024.3", "cfgrib>=0.9"]   # HRRR stack — only for model.enabled
 dev  = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4"]
 
 [project.scripts]

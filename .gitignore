@@ -31,6 +31,7 @@ hrrr/
 # Data parquets are derivable from refresh_data.py / backfill_hrrr.py
 data/*.parquet
 
-# Runtime state for the bot (positions snapshot, kill switch)
+# Runtime state for the bot (positions snapshot, kill switch, scheduler state)
 data/positions.json
 data/KILL_SWITCH
+data/scheduler_state.json

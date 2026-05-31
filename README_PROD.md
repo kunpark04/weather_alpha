@@ -199,7 +199,8 @@ python scripts/kill.py --status   # check
 python scripts/kill.py --disarm   # resume
 ```
 The engine re-checks the switch **before every order**, not just at cycle start, so arming it
-stops a multi-leg wing partway. It does not cancel orders already resting on the exchange —
+stops a multi-leg wing partway. Arming it blocks **new orders only** — a cycle still settles
+prior-day positions and re-syncs bankroll (fixed 2026-05-31). It does not cancel orders already resting on the exchange —
 use the Kalshi UI for that. (The TUI's `k` key writes the same `data/KILL_SWITCH` file.)
 
 > **Pre-live order-safety review (2026-05-30):** an adversarial engine review found and fixed

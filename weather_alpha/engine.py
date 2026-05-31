@@ -17,7 +17,7 @@ import pandas as pd
 
 from weather_alpha.config import Config
 from weather_alpha.data import DataBundle, latest_viable_anchor, load_bundle, refresh_live
-from weather_alpha.execution import ExecutionResult, execute, reconcile_settlements
+from weather_alpha.execution import ExecutionResult, KillSwitchTripped, execute, reconcile_settlements
 from weather_alpha.features import build_features
 from weather_alpha.kalshi import KalshiClient
 from weather_alpha.live_fetchers import fetch_live_cli
@@ -114,7 +114,16 @@ async def run_cycle(
     else:
         strat = _dispatch_strategy(cfg, pred, contracts, feature_row, bankroll)
 
-    exec_result = await execute(cfg, pred, contracts, strat, book, kalshi if cfg.is_live() else None)
+    try:
+        exec_result = await execute(cfg, pred, contracts, strat, book, kalshi if cfg.is_live() else None)
+    except KillSwitchTripped as e:
+        # #5: the kill switch / daily-loss cap blocks NEW ORDERS only — it must NOT block
+        # settlement of prior-day positions or the post-settlement bankroll re-sync (neither
+        # places an order). execute() raises before placing anything, so record a no-trade
+        # result and fall through to the settlement reconcile below.
+        logger.warning("execution gated (%s) — placing no new orders; settlement still runs", e)
+        exec_result = ExecutionResult(fills=0, skipped=0, realized_orders=[],
+                                      diagnostics={"gated": str(e)})
 
     # Settlement: model-enabled reconciles against the freshly-refreshed bundle CLI;
     # model-free pulls the CLI high on demand only when a prior-day position is pending.

@@ -1,0 +1,30 @@
+# systemd one-shot for the Weather Alpha live bot (the daily KXHIGHCHI anchor run).
+# Paired with weather-alpha.timer, which fires it at ~1:05 PM America/Chicago.
+#
+# Install on an always-on Linux host once the venv + creds are in place:
+#   sudo cp deploy/weather-alpha.service deploy/weather-alpha.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now weather-alpha.timer
+#   systemctl list-timers weather-alpha.timer     # confirm the next scheduled run
+#   journalctl -u weather-alpha.service -f         # watch a run live
+#
+# Type=oneshot -> runs ONE cycle (trade today's wing + settle yesterday) then exits.
+# No always-on process; the .timer is the only thing resident. Model-free needs no
+# model artifacts and no HRRR/herbie stack on the host.
+#
+# Creds come from the EnvironmentFile, which MUST carry the read-WRITE Kalshi key
+# (the bot places orders; a read-only key would have its orders rejected).
+
+[Unit]
+Description=Weather Alpha live bot - daily KXHIGHCHI anchor run (one-shot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=fa
+WorkingDirectory=/opt/weather-alpha
+EnvironmentFile=/opt/weather-alpha/secrets/kalshi.env
+ExecStart=/opt/weather-alpha/.venv/bin/python -m weather_alpha --headless
+StandardOutput=journal
+StandardError=journal

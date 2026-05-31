@@ -1,0 +1,23 @@
+# Fires weather-alpha.service once a day at ~1:05 PM Central (the KXHIGHCHI anchor).
+#
+# The "America/Chicago" suffix pins the run to Central regardless of the host's own
+# timezone AND handles DST automatically. It requires systemd >= 252 (Ubuntu 24.04+,
+# Debian 12+, etc. — check with `systemctl --version`). On older systemd, either set
+# the host timezone to Central (`sudo timedatectl set-timezone America/Chicago`) and
+# drop the suffix, or use the UTC equivalent (18:05 during CST / 19:05 during CDT).
+#
+# Persistent=true: if the host was off at 13:05, the run fires on next boot (catch-up).
+# That guarantees yesterday's settlement still happens, but a catch-up TRADE would enter
+# off-anchor (still protected by the engine's open-event guard). If you'd rather skip a
+# missed day's entry than trade late, set Persistent=false.
+
+[Unit]
+Description=Daily trigger for the Weather Alpha anchor run (1:05 PM America/Chicago)
+
+[Timer]
+OnCalendar=*-*-* 13:05:00 America/Chicago
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

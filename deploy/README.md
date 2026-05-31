@@ -52,3 +52,75 @@ journalctl -u orderbook-logger -f
 A Windows laptop still won't survive shutdown. If you have an always-on Windows box,
 use Task Scheduler ("run whether logged on or not" + "restart on failure") or NSSM to
 run it as a service, and `pip install tzdata`. A Linux VM is strongly preferred.
+
+---
+
+# Live bot — daily one-shot (systemd timer)
+
+The trading bot is a **separate** concern from the logger above: it carries the Kalshi RSA
+key and **places orders**. With the production `market_wing` config it is **model-free**, so
+the host needs **no model artifacts and no HRRR/herbie stack**. Because it trades once a day
+at the 1 PM CT anchor, it runs as a **one-shot fired by a timer** (not a resident loop): one
+run trades today's wing, settles yesterday's position, then exits.
+
+## Prereqs (same host as the logger, or its own box)
+```bash
+# get the code into /opt/weather-alpha (clone, or `git pull` if already there), then:
+cd /opt/weather-alpha
+sudo -u fa python3 -m venv .venv
+sudo -u fa .venv/bin/pip install -e .        # BASE deps only — NOT .[data] (no HRRR needed)
+sudo -u fa sed -i 's/^mode: paper/mode: live/' config/weather_alpha.yaml
+```
+No `data/model_v3_artifacts/` and no weather parquets are required — model-free pulls only
+the CLI daily-high, on demand, when settling a prior day.
+
+## Credentials — read-WRITE key for the bot
+The bot reads `KALSHI_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` from its environment; systemd's
+`EnvironmentFile=` injects them (the bot itself never parses `.env`). Use your **read-write**
+key here — the bot places orders, so a read-only key would have them rejected.
+```bash
+# copy the read-write PEM up and hand it to the service user:
+scp kalshi-rw.pem user@vm:/tmp/
+sudo mkdir -p -m 700 /opt/weather-alpha/secrets
+sudo mv /tmp/kalshi-rw.pem /opt/weather-alpha/secrets/
+sudo tee /opt/weather-alpha/secrets/kalshi.env >/dev/null <<'EOF'
+KALSHI_KEY_ID=<your read-write key id>
+KALSHI_PRIVATE_KEY_PATH=/opt/weather-alpha/secrets/kalshi-rw.pem
+EOF
+sudo chown -R fa /opt/weather-alpha/secrets
+sudo chmod 600 /opt/weather-alpha/secrets/kalshi.env /opt/weather-alpha/secrets/kalshi-rw.pem
+```
+Your **read-only** key is reserved for the monitor (built later): it gets its own
+EnvironmentFile with the *same two variable names* pointing at the read-only key — no code
+change, and only the bot ever holds write capability.
+
+## Bring-up — test reads before arming writes
+```bash
+# read-only connectivity check (places NO orders) — run it with the READ-ONLY key first:
+KALSHI_KEY_ID='<read-only id>' KALSHI_PRIVATE_KEY_PATH=/opt/weather-alpha/secrets/kalshi-ro.pem \
+  /opt/weather-alpha/.venv/bin/python scripts/check_kalshi_auth.py     # -> PASS + balance/positions
+# then install + enable the timer (which runs the bot with the read-write key):
+sudo cp deploy/weather-alpha.service deploy/weather-alpha.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now weather-alpha.timer
+systemctl list-timers weather-alpha.timer     # confirm next run ~13:05 America/Chicago
+journalctl -u weather-alpha.service -f         # watch the preflight + cycle when it fires
+```
+
+## Operate
+- **Kill switch:** `python scripts/kill.py` (arm) / `--disarm` / `--status`. Halts the next
+  run before any order; does not cancel orders already resting on Kalshi.
+- **Clock:** ensure NTP is on (`sudo timedatectl set-ntp true`) — Kalshi rejects skewed
+  request signatures. The trade *date* is computed in America/Chicago regardless of host TZ.
+- **One-shot vs loop:** this timer is the lean default. If you later want intraday fill
+  retries or a live-dashboard host, run `--headless --loop` as a long-lived
+  `Restart=on-failure` service instead (heavier; resident process).
+
+## Plain cron (alternative to the timer)
+If you'd rather use cron, put the timezone + a sourced env in the crontab (cron's env is
+otherwise empty, so the creds must be loaded explicitly):
+```cron
+CRON_TZ=America/Chicago
+5 13 * * *  set -a; . /opt/weather-alpha/secrets/kalshi.env; set +a; cd /opt/weather-alpha && .venv/bin/python -m weather_alpha --headless >> /opt/weather-alpha/logs/cron.log 2>&1
+```
+The systemd timer is preferred (TZ-aware, journal logs, catch-up via `Persistent=`).

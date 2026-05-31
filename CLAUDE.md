@@ -47,6 +47,14 @@ Three orthogonal layers: **model** (notebook + artifacts), **strategy/execution*
 (`weather_alpha/`), **config** (YAML). Strategies are pure functions of
 `(StrategyCfg, Prediction, contracts, feature_row, bankroll)` → `StrategyOutput`.
 
+**Three live runtime systems — one writer, two readers:**
+1. **Bot** (`python -m weather_alpha --headless`, fired daily by `deploy/weather-alpha.timer`) —
+   the only writer; owns the trade lifecycle (decide → place → settle) + the Book; **read-write** key.
+2. **Orderbook logger** (`scripts/orderbook_logger.py`) — keyless, public market-depth collection only.
+3. **Monitor (TUI)** — *intended* as a read-only view of positions + account P/L from Kalshi
+   `/portfolio` (**read-only** key). ⚠️ Today the TUI **also drives trading** (duplicate scheduler);
+   turning it into a pure read-only monitor is pending — see [`HANDOFF.md`](HANDOFF.md) §7 "TUI".
+
 ---
 
 ## 3. Core domain concepts
@@ -101,6 +109,11 @@ Three orthogonal layers: **model** (notebook + artifacts), **strategy/execution*
     adopts `get_balance()` at activation and re-syncs after each settlement;
     `strategy.bankroll_usd` is only a paper default / hint. Don't reintroduce
     config-based sizing on the live path.
+12. **`model.enabled=false` gates DATA acquisition, not just decisions.** A model-free
+    strategy fetches no weather and loads no bundle: `refresh_data` no-ops, `run_cycle`
+    skips `load_bundle`, and settlement pulls only the CLI high on demand via
+    `engine.settle_if_due` (prior-day trigger). Don't re-couple the model-free path to
+    METAR/TAF/ASOS/HRRR, `herbie`, `load_bundle`, or model artifacts.
 
 ---
 

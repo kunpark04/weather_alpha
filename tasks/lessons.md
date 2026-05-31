@@ -5,6 +5,29 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L2 — Verify the actual failure path in code before calling something a "blocker"
+
+**Problem.** Explaining a lean-server deployment risk, I asserted the headless `--loop`
+would crash because **`refresh_data` (HRRR/herbie) raises**. Wrong: `fetch_live_hrrr`'s
+`ImportError` is caught by `fetch_all_live`'s per-source try/except, so a missing `herbie`
+is logged and skipped — no crash. The real hard-fail was **`load_bundle`**, which insists
+all 5 weather parquets exist and raises `FileNotFoundError` on the absent HRRR file. I only
+located it correctly after the user pushed back ("I'm confused, rephrase") and I read `data.py`.
+
+**Solution / rules.**
+- **Read the function before naming it the culprit.** When claiming "X crashes / X is the
+  blocker," open X *and the layer around it* (its callers' try/except) first — a caught
+  exception is not a crash.
+- **Trace the failure to the exact line**, not the plausible-sounding one. The hard-fail was
+  one layer away from where I pointed (`load_bundle`, not `refresh_data`).
+- Same root as L1's "don't act on a phantom problem": verify, then assert.
+
+**Why it matters.** A confidently-wrong mechanism sends the user (and the next agent) toward
+the wrong fix — here, "install/trim herbie" instead of the real one, "don't make `load_bundle`
+require model-only parquets in model-free."
+
+---
+
 ## L1 — Don't fire large parallel tool batches; one failure cancels them all
 
 **Problem.** I repeatedly sent ~10–25 tool calls in a single message. The harness

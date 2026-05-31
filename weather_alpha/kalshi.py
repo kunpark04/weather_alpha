@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pandas as pd
@@ -106,6 +107,11 @@ class KalshiClient:
             timeout=cfg.request_timeout_seconds,
             headers={"User-Agent": "weather-alpha/0.1"},
         )
+        # Kalshi signs the FULL request path, including the prefix baked into api_base
+        # (e.g. "/trade-api/v2"). httpx prepends that prefix to the actual request URL,
+        # so the signed string must include it too — otherwise every authenticated call
+        # is signed over the wrong bytes and rejected with 401.
+        self._base_path = urlsplit(cfg.api_base).path.rstrip("/")
         if authenticated:
             key_id = os.environ.get(cfg.key_id_env, "")
             key_path = os.environ.get(cfg.private_key_path_env, "")
@@ -168,23 +174,11 @@ class KalshiClient:
     async def get_balance(self) -> int:
         """Account balance in cents."""
         data = await self._signed_request("GET", "/portfolio/balance")
-        return int(data.get("balance", 0))
+        return _parse_balance_cents(data)
 
     async def get_positions(self) -> list[KalshiPosition]:
         data = await self._signed_request("GET", "/portfolio/positions")
-        out: list[KalshiPosition] = []
-        for p in data.get("market_positions", []):
-            qty = int(p.get("position", 0))
-            if qty == 0:
-                continue
-            side = "yes" if qty > 0 else "no"
-            out.append(KalshiPosition(
-                ticker=p["ticker"],
-                side=side,
-                contracts=abs(qty),
-                avg_price_cents=int(p.get("market_exposure", 0) / max(abs(qty), 1)),
-            ))
-        return out
+        return _parse_positions(data)
 
     async def place_order(
         self,
@@ -227,7 +221,7 @@ class KalshiClient:
         last: Exception | None = None
         for attempt in range(max_attempts):
             ts = int(time.time() * 1000)
-            sig = _sign_request(self._private_key, ts, method, path)
+            sig = _sign_request(self._private_key, ts, method, self._base_path + path)
             headers = {
                 "KALSHI-ACCESS-KEY":        self._key_id,
                 "KALSHI-ACCESS-SIGNATURE":  sig,
@@ -254,6 +248,56 @@ class KalshiClient:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _fp(value: Any) -> float:
+    """Parse a Kalshi fixed-point field (a string like '12.34', or a number) to float.
+    Returns 0.0 for None / unparseable input."""
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _parse_balance_cents(data: dict[str, Any]) -> int:
+    """Account balance in integer cents from a /portfolio/balance response.
+
+    The current API returns `balance_dollars` (fixed-point dollar string); the legacy
+    integer `balance` (cents) was scheduled for removal on 2026-03-12. Prefer the dollar
+    field and fall back to the legacy cents field only when it is the sole one present.
+    """
+    if data.get("balance_dollars") is not None:
+        return int(round(_fp(data["balance_dollars"]) * 100))
+    return int(data.get("balance", 0) or 0)
+
+
+def _parse_positions(data: dict[str, Any]) -> list[KalshiPosition]:
+    """Held market positions from a /portfolio/positions response.
+
+    The current API uses `position_fp` (signed fixed-point count; +YES / -NO) and
+    `market_exposure_dollars` (fixed-point dollars). The legacy integer `position` and
+    `market_exposure` (cents) were scheduled for removal on 2026-03-12. Prefer the new
+    fields and fall back to the legacy pair only when the new ones are absent.
+    """
+    out: list[KalshiPosition] = []
+    for p in data.get("market_positions", []):
+        if p.get("position_fp") is not None:
+            qty = int(round(_fp(p["position_fp"])))
+            exposure_cents = int(round(_fp(p.get("market_exposure_dollars")) * 100))
+        else:
+            qty = int(p.get("position", 0) or 0)
+            exposure_cents = int(p.get("market_exposure", 0) or 0)
+        if qty == 0:
+            continue
+        out.append(KalshiPosition(
+            ticker=p["ticker"],
+            side="yes" if qty > 0 else "no",
+            contracts=abs(qty),
+            avg_price_cents=int(exposure_cents / max(abs(qty), 1)),
+        ))
+    return out
+
 
 def _spec_from_market(m: dict[str, Any]) -> str:
     """Convert a Kalshi market dict to a bucket_spec (subtitle-first, strike fallback)."""

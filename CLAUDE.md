@@ -119,6 +119,12 @@ Three orthogonal layers: **model** (notebook + artifacts), **strategy/execution*
 
 ## 5. Conventions
 
+- **Tables / structured output:** present tabular or comparison data as a standard
+  **GitHub-flavored markdown table** (pipe rows + a `|---|` header-separator line). Keep it
+  **compact so it renders as a clean grid** — few columns, concise cells; don't pack
+  paragraph-length text into a cell (push detail to prose/footnotes below). Inline `code`
+  for identifiers/paths/values, **bold**/*italics* sparingly, emoji where they aid scanning.
+  No ASCII-art boxes; never replace a table with a bullet list for tabular data.
 - **Working directory** is the project root (`weather-alpha/`). All relative paths
   in scripts assume this.
 - **Times** are tz-aware. Local = `America/Chicago`. Anchor = 1 PM local

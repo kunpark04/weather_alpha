@@ -7,12 +7,18 @@ results, retrain steps, and reproducible-command snippets live in [`HANDOFF.md`]
 
 ## 1. What this project is
 
-A probabilistic ML forecaster + production trading engine for **Kalshi `KXHIGHCHI`**,
-the daily maximum-temperature market at **KMDW** (Chicago Midway). The model
-outputs a calibrated PMF over integer °F at 1 PM local; the engine maps that PMF
-onto the day's 6 Kalshi buckets and decides whether and how to bet.
+A probabilistic ML forecaster + **multi-market** production trading engine for Kalshi
+daily maximum-temperature markets. The engine trades a **configurable list of US cities**
+(each `{name, event_pattern, station, local_tz}`), firing each at *its own* local 1 PM;
+Chicago **`KXHIGHCHI`** at **KMDW** (Chicago Midway) is the seed market. The production
+strategy is the **model-free** `market_wing + drop_lower_ask` — it anchors on the market,
+not the model, so it maps each event's 6 Kalshi buckets to a wing without any weather feed.
+The v3 model (calibrated PMF over integer °F at 1 PM local, mapped onto the buckets) is
+retained for the model-enabled path but is **not** used by the production strategy.
 
-**Mode:** paper trading. Live mode is wired but not yet enabled.
+**Mode is per-process** (one LIVE process, one PAPER process — never mixed in a Book). Live
+is wired + the authenticated read path is validated, but the first live order/fill is still
+unexercised; both processes today are paper. See [`HANDOFF.md`](HANDOFF.md) §1.5, §7.
 
 ---
 
@@ -21,39 +27,71 @@ onto the day's 6 Kalshi buckets and decides whether and how to bet.
 ```
 notebooks/model_v3.ipynb            <-- model R&D, retraining, calibration
         |
-        v  saved artifacts (joblib + npy + parquet)
+        v  saved artifacts (joblib + npy + parquet) -- used ONLY when model.enabled
 data/model_v3_artifacts/
         |
         v  loaded by
 weather_alpha/                     <-- production package (always-on bot)
    model.py        Prediction dataclass + artifact loader
    pmf.py          PMF utilities, bucket parsing, rearrangement
-   kalshi.py      KalshiContract dataclass, status filter
+   kalshi.py      KalshiContract + parser (subtitle OR yes_sub_title; between/less/greater);
+                  event_date_code() locale-safe ticker date
    live_fetchers.py     async METAR/TAF/ASOS/HRRR/CLI/Kalshi
-   strategy.py    8 strategy fns; run_wing_strategy is production
-   calibration.py LOO alpha (currently 0 -- market-only)
+   strategy.py    8 strategy fns; run_wing_strategy is production (flat-$, fee-aware)
+   calibration.py LOO alpha (currently 0 -- market-only; unused on the model-free path)
    fees.py        Kalshi fee = ceil(7% * N * P * (1-P))
-   execution.py   paper/live order routing
-   engine.py      orchestrator (data refresh / anchor / intraday)
-   scheduler.py   minute-tick scheduler
+   execution.py   paper/live order routing; kill switch + exposure/daily-loss caps
+   positions.py   Position(+station) + Book (per-city & account drawdown HWM, latched halts)
+   engine.py      orchestrator: run_cycle iterates markets under ONE shared Book ->
+                  list[CycleResult]; per-market isolation; per-station settlement
+   report.py      concise operator stream (ENTER/SKIP/FILLED/SETTLED/HALTED lines)
+   scheduler.py   Scheduler (single-tz, model path) + MarketAnchorScheduler (per-tz, resident bot)
    tui.py         Textual TUI
-   main.py        entry point
+   main.py        entry point: resident --headless --loop multi-market loop (+ single-tz model loop)
         |
         v  driven by
-config/weather_alpha.yaml          <-- persistent knobs (bankroll, kelly, throttle)
+config/weather_alpha.yaml          <-- default knobs (bankroll, kelly, throttle, markets)
+config/{live,paper}.yaml           <-- resident multi-market bots (Option B; markets: list)
+config/{chicago_live,houston_paper}.yaml  <-- per-(mode,tz) one-shot timers (Option A)
 ```
 
 Three orthogonal layers: **model** (notebook + artifacts), **strategy/execution**
 (`weather_alpha/`), **config** (YAML). Strategies are pure functions of
 `(StrategyCfg, Prediction, contracts, feature_row, bankroll)` → `StrategyOutput`.
 
+**Multi-market design.** A config carries a `markets:` list — each a `MarketCfg`
+(`{name, event_pattern, station, local_tz}`). `run_cycle` iterates the markets (or a due
+subset) under **one shared `Book`/bankroll** and returns `list[CycleResult]` (one per
+market); a per-market failure is isolated so one city can't crash the others. Settlement is
+**per-station** (`settle_market_if_due` pulls each city's CLI high on demand). A legacy
+single-market config (top-level `station`/`local_tz` + `execution.market_event_pattern`)
+still loads — one market is synthesized — so full back-compat holds.
+
+**Risk model.** `Book` tracks per-city + whole-account drawdown high-water marks and
+**latched halts**: a city stops at **25%** drawdown of the running account, the whole
+account at **50%**, both measured from the peak and latched until manual reset
+(`scripts/halt.py --reset … --config <cfg>`). `total_exposure_max_pct` is enforced in
+`execute()`. Sizing is unchanged — flat **$2.50/trade**, equal-payout; the drawdown stops
+are an orthogonal gate, not a sizing change.
+
+**Two deploy shapes (pick one per city).** *Option A* — per-(mode,tz) one-shot `systemd
+--user` timers (`config/{chicago_live,houston_paper}.yaml` + `deploy/weather-alpha-{chicago,houston}.{service,timer}`,
+fire 13:00 local). *Option B* — one **resident** `--headless --loop` bot per mode across all
+US tz (`config/{live,paper}.yaml` + `deploy/weather-alpha-{live,paper}.service`), where
+`MarketAnchorScheduler` fires each city at its own local 1 PM (DST-correct, 60-min
+post-anchor window, no off-anchor catch-up on a late restart). `live.yaml` markets=[CHI];
+`paper.yaml` markets=[HOU, CHI] (paper shadows live Chicago). A LIVE + a PAPER process for
+the *same* city is fine (paper places no real orders); never run two LIVE shapes for one city.
+
 **Three live runtime systems — one writer, two readers:**
-1. **Bot** (`python -m weather_alpha --headless`, fired daily by `deploy/weather-alpha.timer`) —
-   the only writer; owns the trade lifecycle (decide → place → settle) + the Book; **read-write** key.
+1. **Bot** (resident `python -m weather_alpha --headless --loop`, or per-city one-shots fired by a
+   `deploy/weather-alpha-*.timer`) — the only writer; owns the trade lifecycle (decide → place →
+   settle) + the Book; **read-write** key.
 2. **Orderbook logger** (`scripts/orderbook_logger.py`) — keyless, public market-depth collection only.
 3. **Monitor (TUI)** — *intended* as a read-only view of positions + account P/L from Kalshi
-   `/portfolio` (**read-only** key). ⚠️ Today the TUI **also drives trading** (duplicate scheduler);
-   turning it into a pure read-only monitor is pending — see [`HANDOFF.md`](HANDOFF.md) §7 "TUI".
+   `/portfolio` (**read-only** key). ⚠️ Today the TUI **also drives trading** (duplicate single-tz
+   scheduler + `run_cycle`); turning it into a pure read-only monitor is the one deferred
+   review item — see [`HANDOFF.md`](HANDOFF.md) §7 "TUI".
 
 ---
 
@@ -193,8 +231,10 @@ Every md file that governs how this project is worked on:
 | `notebooks/model_v3.ipynb` | Production model notebook — features, CV, calibration, §10.3 Kalshi-resolution diagnostic |
 | `notebooks/model_v4.ipynb` | Parallel R&D variant — midnight anchor (NOT production) |
 | `notebooks/live_predict.ipynb` | Live prediction pipeline (loads v3 artifacts) |
-| `config/weather_alpha.yaml` | Persistent strategy/risk config |
-| [`deploy/README.md`](deploy/README.md) | Always-on deployment guide — orderbook-logger systemd unit + hosting options |
+| `config/weather_alpha.yaml` | Default strategy/risk config (single-market); multi-market lives in `config/{live,paper}.yaml`, per-tz one-shots in `config/{chicago_live,houston_paper}.yaml` |
+| [`deploy/README.md`](deploy/README.md) | Always-on deployment guide — orderbook-logger + the two bot shapes (Option A per-city timers / Option B resident multi-market), operator tools (`scripts/kill.py`, `scripts/halt.py` — both need `--config`) |
+| [`tasks/multimarket_refactor_plan.md`](tasks/multimarket_refactor_plan.md) | Multi-market refactor design + locked decisions (markets list, shared Book, per-tz scheduler, drawdown halts) |
+| [`tasks/engine_code_review_2026-06-01.md`](tasks/engine_code_review_2026-06-01.md) | Adversarial engine review (2 CRITICAL · 7 WARN · 8 INFO + follow-up) with a Resolution section — all fixed; TUI read-only conversion deferred |
 | [`tasks/lessons.md`](tasks/lessons.md) | Self-improvement log — recurring-mistake patterns + prevention rules |
 
 Excluded from the index (auto-generated or vendored, no managerial role):

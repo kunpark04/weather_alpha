@@ -1,27 +1,36 @@
 # Weather Alpha — Production Engine
 
-Terminal-resident, always-on trading bot for Kalshi `KXHIGHCHI` (KMDW daily-high).
-Ships with the v3 ML model from `notebooks/model_v3.ipynb` (CRPS 1.204 °F, 46 features)
-— used only when `model.enabled`; the current production strategy runs **model-free**.
+Terminal-resident, always-on **multi-market** trading bot for Kalshi daily-high markets
+(seed: `KXHIGHCHI` at KMDW). It trades a configurable `markets:` list of US cities under one
+shared Book, firing each at its own local 1 PM. Ships with the v3 ML model from
+`notebooks/model_v3.ipynb` (CRPS 1.204 °F, 46 features) — used only when `model.enabled`; the
+current production strategy runs **model-free**.
 
-> **Status:** PAPER, validated end-to-end. **Production strategy = model-free
+> **Status:** PAPER, validated end-to-end (the multi-market paper bot runs all configured
+> cities clean against the live market). **Production strategy = model-free
 > `market_wing + drop_lower_ask`, flat-$ sizing** (config `strategy.name` +
-> `model.enabled: false`), dispatched via `engine._dispatch_strategy` →
-> `run_wing_strategy`. The v3 model is **not used** (anchor = market; HANDOFF §1.5).
-> LIVE needs only free Kalshi RSA creds + `mode: live` — no weather feed, no same-day
-> anchor. See [§ Going LIVE](#going-live).
+> `model.enabled: false`), dispatched via `engine._dispatch_strategy` → `run_wing_strategy`.
+> The v3 model is **not used** (anchor = market; HANDOFF §1.5). Mode is **per-process** (one
+> LIVE process, one PAPER process — never mixed in a Book). Hardened through two adversarial
+> code-review passes (all findings fixed; 28 tests pass — see [§ Risk & safety](#risk--safety)).
+> The authenticated **read** path is validated, but the **first live order/fill is still
+> unexercised**. LIVE needs only free Kalshi RSA creds + `mode: live` — no weather feed, no
+> same-day anchor. See [§ Going LIVE](#going-live).
 
 ---
 
-## Architecture (three engines)
+## Architecture (multi-market, three engines)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                       PRODUCTION ENGINE (main.py)                       │
-│   main → scheduler.Scheduler → engine.run_cycle → TUI                   │
+│  Option B (resident):  main → MarketAnchorScheduler → engine.run_cycle  │
+│  Option A (one-shot):  main --headless (per-city, fired by a timer)     │
+│  Model path / TUI:     main → scheduler.Scheduler → run_cycle → TUI     │
 │                                                                         │
-│   Textual TUI is the always-on window. Scheduler ticks once a minute   │
-│   and dispatches DATA_REFRESH / ANCHOR / INTRADAY to run_cycle.         │
+│  run_cycle iterates the `markets:` list under ONE shared Book and       │
+│  returns list[CycleResult] (one per city). A per-market failure is      │
+│  isolated; settlement is per-station. Mode (live/paper) is per-process. │
 └──────────────────────────┬──────────────────────────────────────────────┘
                            │
         ┌──────────────────┼──────────────────┐
@@ -33,13 +42,19 @@ Ships with the v3 ML model from `notebooks/model_v3.ipynb` (CRPS 1.204 °F, 46 f
 │ market_wing   │  │  paper / live  │  │  log.py         │
 │ model-free    │  │  fills, fees,  │  │  model.py       │
 │ flat-$ sizing │  │  risk caps,    │  │  pmf.py         │
-│ +fee-aware    │  │  kill switch   │  │  features.py    │
-│               │  │                │  │  data.py        │
+│ +fee-aware    │  │  exposure cap, │  │  features.py    │
+│               │  │  kill switch   │  │  data.py        │
 │  strategy.py  │  │  execution.py  │  │  kalshi.py      │
 │               │  │  positions.py  │  │  fees.py        │
-│               │  │  live_log.py   │  │                 │
+│               │  │  live_log.py   │  │  report.py      │
 └───────────────┘  └────────────────┘  └─────────────────┘
 ```
+
+`positions.py` holds the shared `Book` (per-city + account drawdown high-water marks and
+latched halts); `report.py` is the concise operator stream (ENTER/SKIP/FILLED/SETTLED/HALTED
+lines) the resident bot prints. The single-tz `scheduler.Scheduler` still drives the model
+path + the TUI; the resident multi-market loop uses `MarketAnchorScheduler` (per-city local
+1 PM across any US tz).
 
 **Pure-Python brain per the architecture research.** No C++/Rust in v1 — Kalshi's
 latency profile doesn't justify it, and the strategy + execution bottleneck is decision
@@ -66,25 +81,35 @@ python -c "from weather_alpha import config, model, strategy, execution, tui; pr
 
 ## Configure
 
-Single source of truth: [`config/weather_alpha.yaml`](config/weather_alpha.yaml).
+Configs (resolution: `--config /abs/path.yaml` > `$WEATHER_ALPHA_CONFIG` > default):
 
-- `mode: paper` is the default and is safe — no orders are submitted to Kalshi.
-- `mode: live` requires `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` in the
-  environment (or `.env` — copy from `.env.example`).
-- Override the YAML path with `--config /abs/path.yaml` or `$WEATHER_ALPHA_CONFIG`.
+- [`config/weather_alpha.yaml`](config/weather_alpha.yaml) — the default, single-market.
+- `config/live.yaml` / `config/paper.yaml` — **resident multi-market** bots (Option B): a
+  `markets:` list, one per mode. `live.yaml` = `[CHI]`; `paper.yaml` = `[HOU, CHI]`.
+- `config/chicago_live.yaml` / `config/houston_paper.yaml` — per-(mode,tz) **one-shot** (Option A).
+
+`mode: paper` is the default and is safe — no orders are submitted to Kalshi. `mode: live`
+requires `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` in the environment (or `.env`).
+
+**`markets:`** is a list of `{name, event_pattern, station, local_tz}` — add a city by
+appending one line (use the exact IANA tz, incl. no-DST `America/Phoenix`). A legacy
+single-market config (top-level `station`/`local_tz` + `execution.market_event_pattern`)
+still loads — one market is synthesized. Mode is per-process; never mix live/paper in one Book.
 
 Key knobs:
 
 | Section | Knob | What it does |
 |---|---|---|
-| `strategy` | `kelly_fraction` | Fractional Kelly (default 0.25). |
-| `strategy` | `kl_concentration_alpha` | 0 = uniform across positive-edge buckets; 1 = full KL-weighted concentration. |
-| `strategy` | `edge_floor_cents` | Minimum net-of-fee EV (cents) before opening a position. |
+| `strategy` | `name` | Engine dispatch target. Production = `market_wing` (model-free). |
+| `strategy` | `wing.flat_usd` | Flat-$ total stake per trade (production: `2.5`); `0` falls back to Kelly. |
+| `strategy` | `wing.fee_aware` | Skip a fire when fees would eat the whole win. |
 | `strategy` | `per_contract_max_pct` | Hard per-contract cap as % of bankroll. |
-| `strategy` | `total_exposure_max_pct` | Hard total-exposure cap as % of bankroll. |
+| `strategy` | `total_exposure_max_pct` | Total-exposure cap as % of bankroll — **enforced in `execute()`** (shared across all markets in the process). |
 | `risk` | `daily_max_loss_usd` | Halts new entries once realized losses for the day exceed this. |
+| `risk` | `per_city_drawdown_pct` | Latch a per-city halt at this drawdown of the running account (default 0.25). |
+| `risk` | `account_drawdown_pct` | Latch a whole-account halt at this drawdown (default 0.50). |
 | `execution` | `fill_model` | PAPER fill price: `ask` (conservative), `mid`, or `bid`. |
-| `execution` | `intraday_refresh_minutes` | How often the post-anchor intraday cycle runs. |
+| `execution` | `intraday_refresh_minutes` | How often the post-anchor intraday cycle runs (model path). |
 
 ---
 
@@ -115,18 +140,22 @@ Key bindings:
 ### Headless (cron / one-shot / debug)
 
 ```powershell
-# One cycle for the latest viable anchor, then exit
+# One cycle for every market in the config (the latest viable anchor), then exit
 python -m weather_alpha --headless
 
 # One cycle, force a specific anchor date
 python -m weather_alpha --headless --anchor 2026-05-22
 
-# Skip the slow IEM + HRRR refresh subprocesses (use existing parquets)
+# Skip the slow IEM + HRRR refresh subprocesses (model path only; use existing parquets)
 python -m weather_alpha --headless --no-refresh
 
-# Stay-alive scheduler loop without TUI
-python -m weather_alpha --headless --loop
+# RESIDENT multi-market loop (Option B): fires each city at its own local 1 PM, no TUI
+python -m weather_alpha --headless --loop --config config/paper.yaml
 ```
+
+The resident `--loop` is the production shape for "one bot, all cities" — it sleeps until the
+next city's anchor (capped at 5 min) via `MarketAnchorScheduler` and prints the `report.py`
+ENTER/FILLED/SETTLED lines. See [§ Deploy](#deploy) for the two systemd shapes.
 
 ---
 
@@ -163,55 +192,90 @@ python -m weather_alpha --headless --loop
 
 ---
 
+## Risk & safety
+
+Three independent gates, all enforced in `execute()` / the cycle, none of which change sizing
+(production sizing is flat **$2.50/trade**, equal-payout):
+
+- **Kill switch** — re-checked **before every order** (stops a multi-leg wing partway); blocks
+  **new orders only** — a cycle still settles prior-day positions and re-syncs bankroll. Per
+  config (each config has its own `kill_switch` path).
+- **Drawdown halts (latched)** — the shared `Book` halts a **city at 25%** drawdown of the
+  running account and the **whole account at 50%**, measured from the cumulative-realized peak
+  and held until manual reset. A halted city still settles. `scripts/halt.py --status` /
+  `--reset [STATION]`.
+- **Exposure + daily-loss caps** — `total_exposure_max_pct` (Σ open exposure + the new leg,
+  shared across all markets) and `risk.daily_max_loss_usd` both refuse new entries when tripped.
+
+> **Hardening (two adversarial review passes).** Pre-live (2026-05-30): 4 CRITICAL live-path
+> bugs fixed — fill confirmation (no phantom positions), deterministic order ids (no duplicate
+> orders on retry), intraday risk breakers — plus the WARN-tier robustness gaps (LIVE bankroll
+> verified from `get_balance()` + re-synced, scheduler state persisted, event-selection guard,
+> per-leg order errors). Multi-market (2026-06-01): a further **2 CRITICAL + 7 WARN + 8 INFO +
+> 9 follow-up** findings, all fixed + verified — kill/halt reach the live bot from a credless
+> shell, exposure cap enforced, LIVE sizing/cancel use exchange truth, paper bankroll no longer
+> double-counts fees, one bad market can't crash the others or trade off-anchor. **28 tests
+> pass.** See [`tasks/engine_code_review_2026-06-01.md`](tasks/engine_code_review_2026-06-01.md)
+> (Resolution section) and the earlier [`tasks/review_engine_logic.md`](tasks/review_engine_logic.md).
+> A stats review ([`tasks/review_backtest_stats.md`](tasks/review_backtest_stats.md)) rates the
+> edge real but thin/front-loaded → keep this a **$2.50 toy forward-test; do not scale capital**.
+
+---
+
+## Deploy
+
+Two interchangeable systemd shapes (full runbook: [`deploy/README.md`](deploy/README.md)):
+
+- **Option A — per-(mode,tz) one-shot timers.** `config/{chicago_live,houston_paper}.yaml` +
+  `deploy/weather-alpha-{chicago,houston}.{service,timer}` (fire 13:00 local, `AccuracySec=1s`).
+  Simplest for a single timezone.
+- **Option B — one resident `--loop` bot per mode** across all US tz. `config/{live,paper}.yaml`
+  + `deploy/weather-alpha-{live,paper}.service`. The "one bot for all live cities" shape.
+
+A LIVE process **plus** a PAPER process for the *same* city is fine (paper places no real
+orders — a useful shadow-test); **never** run two LIVE shapes for one city (they'd double-trade).
+Operator tools `scripts/kill.py` and `scripts/halt.py` now **require `--config <the running
+bot's config>`** and load with the cred check off, so they work from a credless shell.
+
+---
+
 ## Going LIVE
 
 PAPER is the default. The production strategy is **model-free**, so going live is short
-(no weather feed, no 30-day model-validation gate, no paid API tier):
+(no weather feed, no 30-day model-validation gate, no paid API tier) — but the first real
+order is genuinely untested:
 
-- [ ] Create a **free** Kalshi API key — generate an RSA-2048 key pair, upload the public
-      key in Kalshi settings, save the private key locally, set `KALSHI_KEY_ID` and
-      `KALSHI_PRIVATE_KEY_PATH` in `.env`. (Kalshi API access is free; no paid tier.)
-- [ ] `strategy.bankroll_usd` is already `25` — but in LIVE the engine verifies the real
-      balance via `get_balance()` at startup and re-syncs after each settlement, so the config
-      value is only a paper default / hint. Do not start large.
-- [ ] Set `risk.daily_max_loss_usd` to a number you can lose without flinching; execution
-      refuses new entries once daily realized losses exceed it.
-- [ ] Dry-run: `python -m weather_alpha --headless --no-refresh` and read the log — confirm
-      the orders that *would* be placed match intuition. (Model-free needs no `--anchor` or
-      weather; the anchor is simply today's event date.)
-- [ ] Deploy on an always-on host so the 1 PM anchor fires with your laptop off — see
-      [`deploy/README.md`](deploy/README.md).
+- [ ] Create a **free** Kalshi API key — RSA-2048 key pair, upload the public key in Kalshi
+      settings, set `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` (read-**write** key for the bot).
+- [ ] Confirm the read path: `python scripts/check_kalshi_auth.py` PASSES (it already does with
+      both RO and RW keys; balance parses). LIVE adopts the real balance via `get_balance()` at
+      startup + re-syncs after settlement — config `bankroll_usd` is only a hint. Do not start large.
+- [ ] **Phase 7 — run the multi-market PAPER bot ~1 week** (`config/paper.yaml`, both cities)
+      before flipping any city LIVE. The loop/settlement/risk/reporter are validated in paper;
+      the **LIVE order-placement + real-fill path is still unexercised** (0 open positions).
+- [ ] Set `risk.daily_max_loss_usd` + the drawdown pcts to numbers you can lose without flinching.
+- [ ] Dry-run a single LIVE city by hand and read the log — confirm the orders that *would* be
+      placed match intuition. (Model-free needs no `--anchor` or weather; anchor = today's event.)
+- [ ] Deploy on an always-on host so each 1 PM anchor fires with your laptop off — see [§ Deploy](#deploy).
 
 > Retired gates: the old "30 paper days" and "adopt Synoptic for same-day data" requirements
 > no longer apply — `market_wing` is model-free (HANDOFF §1.5), and at $25 this is deliberate
 > low-stakes live-learning.
 
-When those are green, edit `config/weather_alpha.yaml`:
-```yaml
-mode: live
-```
-and `python -m weather_alpha`. The status bar will show `[LIVE]` in red.
+Flip a single city LIVE by pointing its process at a `mode: live` config (e.g. `config/live.yaml`
+or `config/chicago_live.yaml`). In the TUI the status bar shows `[LIVE]` in red.
 
 **Kill switch — halt at any time, from any terminal:**
 ```powershell
-python scripts/kill.py            # ARM  — bot halts before the next order (even mid-cycle)
-python scripts/kill.py --status   # check
-python scripts/kill.py --disarm   # resume
+python scripts/kill.py --config config/live.yaml            # ARM  — halts before the next order
+python scripts/kill.py --status --config config/live.yaml   # check
+python scripts/kill.py --disarm --config config/live.yaml   # resume
 ```
-The engine re-checks the switch **before every order**, not just at cycle start, so arming it
-stops a multi-leg wing partway. Arming it blocks **new orders only** — a cycle still settles
-prior-day positions and re-syncs bankroll (fixed 2026-05-31). It does not cancel orders already resting on the exchange —
-use the Kalshi UI for that. (The TUI's `k` key writes the same `data/KILL_SWITCH` file.)
-
-> **Pre-live order-safety review (2026-05-30):** an adversarial engine review found and fixed
-> 4 CRITICAL live-path bugs — fill confirmation (no phantom positions), deterministic order
-> ids (no duplicate orders on retry), and intraday risk circuit breakers. A follow-up pass then
-> filled the WARN-tier robustness gaps — LIVE bankroll verified from `get_balance()` + re-synced
-> after settlement, scheduler state persisted across restart, an event-selection guard, and
-> per-leg order-error handling (W1-W5). See
-> [`tasks/review_engine_logic.md`](tasks/review_engine_logic.md). A stats review
-> ([`tasks/review_backtest_stats.md`](tasks/review_backtest_stats.md)) rates the edge real but
-> thin/front-loaded → keep this a **$2.50 toy forward-test; do not scale capital** on it.
+Re-checked **before every order** (stops a multi-leg wing partway); blocks **new orders only** —
+a cycle still settles prior-day positions and re-syncs bankroll. It does **not** cancel orders
+already resting on the exchange — use the Kalshi UI. (The TUI's `k` key writes the same
+`KILL_SWITCH` file.) Drawdown halts use the sibling `scripts/halt.py --status / --reset` (also
+`--config`).
 
 ---
 
@@ -220,13 +284,13 @@ use the Kalshi UI for that. (The TUI's `k` key writes the same `data/KILL_SWITCH
 | # | Limitation | Mitigation |
 |---|---|---|
 | 1 | Anchor lag (IEM ASOS, ~2 days) — **only affects `model.enabled` mode**; the production model-free path uses today's event date. | Obsolete for `market_wing`; adopt Synoptic only if running a model-anchored strategy. |
-| 2 | LIVE books only confirmed fills (C1 polls `get_positions`), but doesn't yet reconcile the Book against `get_positions()` at *cycle start* — an out-of-band or mid-exception fill stays unbooked. | Add a cycle-start `get_positions()` reconcile (the C1/W5 tail) before scaling capital. |
-| 3 | LIVE books the observed avg fill price (C1), not the limit; the booked *fee* is still estimated from that price rather than read from `/portfolio/fills`. | Reconcile fees from `/portfolio/fills` (I4) — minor at $25. |
-| 4 | Features come from dynamic-exec of `notebooks/model_v3.ipynb` (fragile if the notebook moves). | Port §3.* cells into `weather_alpha/features_v3.py` and validate parity. |
-| 5 | Kalshi WebSocket is not wired (REST polling only). | Add `kalshi.ws` and switch real-time market state to WS feed. |
-| 6 | Regime throttle uses simple thresholds; no learned regime classifier. | Train a regime classifier on `live_log.parquet` once it has ≥ 60 days. |
+| 2 | LIVE order/fill path is **unexercised** (0 open positions to date) — and the Book isn't yet reconciled against `get_positions()` at *cycle start*, so an out-of-band or mid-exception fill stays unbooked. | Phase 7 paper week first; add a cycle-start `get_positions()` reconcile (HANDOFF `RECON`) before scaling capital. |
+| 3 | The **TUI still drives trading** (old single-tz scheduler + `run_cycle`) rather than being a read-only monitor — don't run it as a passive viewer yet. | Convert to read-only `/portfolio` polling (the one deferred review item; HANDOFF `TUI`). |
+| 4 | LIVE books the observed avg fill price (C1), not the limit; the booked *fee* is still estimated rather than read from `/portfolio/fills`. | Reconcile fees from `/portfolio/fills` (I4) — minor at $25. |
+| 5 | Features come from dynamic-exec of `notebooks/model_v3.ipynb` (fragile if the notebook moves) — model path only. | Port §3.* cells into `weather_alpha/features_v3.py` and validate parity. |
+| 6 | Kalshi WebSocket is not wired (REST polling only). | Add `kalshi.ws` and switch real-time market state to WS feed. |
 
-These are tracked in HANDOFF.md §6 (research-side outstanding work).
+These are tracked in HANDOFF.md §7 (open items) and §6 (research-side outstanding work).
 
 ---
 
@@ -234,22 +298,23 @@ These are tracked in HANDOFF.md §6 (research-side outstanding work).
 
 | Module | Role |
 |---|---|
-| `weather_alpha/config.py` | Dataclass config loaded from `config/weather_alpha.yaml`. |
+| `weather_alpha/config.py` | Dataclass config; `markets:` list (+ single-market back-compat), `MarketCfg`/`RiskCfg` drawdown pcts, `config_path`, `load_config(require_live_creds=)`. |
 | `weather_alpha/log.py` | Rotating file log + in-memory ring buffer for the TUI. |
-| `weather_alpha/model.py` | Loads `data/model_v3_artifacts/`, `predict_for_anchor`. |
+| `weather_alpha/model.py` | Loads `data/model_v3_artifacts/`, `predict_for_anchor` (model path only). |
 | `weather_alpha/pmf.py` | Quantile→PMF, bucket parsers, KL, market-implied PMF. |
 | `weather_alpha/features.py` | Dynamic-exec of `model_v3.ipynb` §3.* into a controlled namespace. |
 | `weather_alpha/data.py` | `refresh_iem`, `refresh_hrrr`, `load_bundle`, `latest_viable_anchor`. |
-| `weather_alpha/kalshi.py` | Async REST client (public + RSA-PSS-signed endpoints). |
+| `weather_alpha/kalshi.py` | Async REST client (public + RSA-PSS-signed); parser reads `subtitle`/`yes_sub_title` + `between`/`less`/`greater`; locale-safe `event_date_code`. |
 | `weather_alpha/fees.py` | Kalshi 7%·N·P·(1−P) fee formula. |
-| `weather_alpha/strategy.py` | Joint Kelly + KL concentration + regime throttle. |
-| `weather_alpha/positions.py` | Per-position state + JSON snapshot persistence. |
-| `weather_alpha/execution.py` | Paper/live fills, risk gates, settlement reconciliation. |
+| `weather_alpha/strategy.py` | 8 strategy fns; `run_wing_strategy` (production: market_wing, flat-$, fee-aware). |
+| `weather_alpha/positions.py` | `Position`(+`station`) + shared `Book` — per-city/account drawdown HWM + latched halts, JSON snapshot. |
+| `weather_alpha/execution.py` | Paper/live fills; kill switch, exposure + daily-loss caps, per-anchor cap; settlement reconciliation. |
+| `weather_alpha/report.py` | Concise operator terminal stream (ENTER/SKIP/FILLED/SETTLED/HALTED). |
 | `weather_alpha/live_log.py` | Append rows to `data/live_log.parquet`. |
-| `weather_alpha/scheduler.py` | Pure-logic scheduler: refresh/anchor/intraday decisions. |
-| `weather_alpha/engine.py` | `run_cycle` — one full anchor cycle end-to-end. |
-| `weather_alpha/tui.py` | Textual app — five panels, key bindings, scheduler dispatch. |
-| `weather_alpha/main.py` | Entry point — TUI by default, `--headless` for one-shot/loop. |
+| `weather_alpha/scheduler.py` | `Scheduler` (single-tz: refresh/anchor/intraday) + `MarketAnchorScheduler` (per-tz, resident bot). |
+| `weather_alpha/engine.py` | `run_cycle` — iterates `markets` under one Book → `list[CycleResult]`; per-station settlement; drawdown latching. |
+| `weather_alpha/tui.py` | Textual app — five panels, key bindings, scheduler dispatch (⚠️ still an active trading driver). |
+| `weather_alpha/main.py` | Entry point — TUI by default, `--headless [--loop]` for one-shot / resident multi-market loop. |
 
 Reference notebooks (input to production code, not run by it):
 - `notebooks/model_v3.ipynb` — ★ production model trainer.

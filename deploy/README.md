@@ -108,8 +108,14 @@ journalctl -u weather-alpha.service -f         # watch the preflight + cycle whe
 ```
 
 ## Operate
-- **Kill switch:** `python scripts/kill.py` (arm) / `--disarm` / `--status`. Halts the next
-  run before any order; does not cancel orders already resting on Kalshi.
+- **Kill switch:** `python scripts/kill.py --config config/weather_alpha.yaml` (arm) /
+  `--disarm` / `--status`. Halts the next run before any order; does not cancel orders already
+  resting on Kalshi. `--config <the running bot's config>` is **required** (it locates that
+  bot's `KILL_SWITCH` path) and loads with the live-cred check OFF, so it works from a credless
+  shell — point it at the *exact* config the target bot runs.
+- **Drawdown halt status/reset:** `python scripts/halt.py --status --config <cfg>` shows the
+  per-city / account drawdown halts; `--reset [STATION]` clears them (a halted city still
+  settles; it just stops opening new trades). Same `--config` requirement + credless load.
 - **Clock:** ensure NTP is on (`sudo timedatectl set-ntp true`) — Kalshi rejects skewed
   request signatures. The trade *date* is computed in America/Chicago regardless of host TZ.
 - **One-shot vs loop:** this timer is the lean default. If you later want intraday fill

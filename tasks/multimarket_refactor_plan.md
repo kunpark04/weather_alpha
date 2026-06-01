@@ -73,7 +73,7 @@ then automatic via the tz-aware scheduler. Never hard-code a UTC offset.
 | D1 | **Config gains a `markets:` list**, each `{name, event_pattern, station, local_tz}`. `mode` stays top-level (process = one mode). Strategy/risk/kalshi blocks shared. | Each process = one mode, N cities. Per-market only needs market/station/tz; the wing knobs are shared (allow per-market overrides later). |
 | D2 | **One shared `Book` + one `bankroll_cents` per process.** Positions key by `ticker:side` (ticker already encodes the city → no collision). `verify_bankroll` adopts the account balance once. | A live account has ONE balance; trading N live cities draws from the same pot. Shared Book = the account's full position set. |
 | D3 | **Mode is process-level** → `execute(... client if cfg.is_live() else None)` is unchanged; no per-market mode routing. | Segregating by process means no live/paper mixing inside one Book — eliminates the contamination risk. |
-| D4 | **Risk caps become process-wide** where they gate the account: `total_exposure_max_pct` and the daily-outlay cap already sum across all Book positions (per date / via `exposure_cents()`), so they "just work" process-wide with a shared Book. `per_anchor_max_trades` stays **per-market** (runaway backstop per event). `per_contract_max_pct` unchanged. | Protect the *account* across cities; cap each event's leg count locally. |
+| D4 | **Risk caps become process-wide** where they gate the account: the daily-outlay cap sums across all Book positions per date, and **`total_exposure_max_pct` is explicitly enforced in `execute()`** — gate Σ `exposure_cents()` + leg ≤ pct×balance (C2 fix, 2026-06-01; it was NOT implicit, contra the original claim). `per_anchor_max_trades` stays **per-market** (runaway backstop per event). `per_contract_max_pct` unchanged. | Protect the *account* across cities; cap each event's leg count locally. |
 | D5 | **Settlement becomes per-station.** Each Position carries its `station` (or derive via a ticker-prefix→market map); `settle_if_due`/`reconcile_settlements` group pending positions by station and fetch each station's CLI. `fetch_live_cli` already generalizes (verified for KHOU). | Chicago settles on KMDW, Houston on KHOU, etc. — one CLI per station. |
 | D6 | **Kill switch + state are per-process** (one `data/<process>/` dir, one `KILL_SWITCH`). | One halt per bot; isolated state per process (live vs paper, and per-tz group). |
 | D7 | **Back-compat:** if a config has no `markets:` list, synthesize a 1-element list from the legacy `station`/`local_tz`/`execution.market_event_pattern`. | The existing single-city configs (`chicago_live.yaml`, `houston_paper.yaml`) keep working untouched. |
@@ -141,8 +141,9 @@ risk-gate paths; mirrors to the structured logger but is its own concise stream.
 - `CycleResult` becomes per-market (list) or aggregated.
 
 **Phase 3 — Risk gates** (`execution.py`)
-- Confirm `total_exposure_max_pct` + daily-outlay checks read the **shared Book totals**
-  (already do — they sum across tickers/dates), so they gate the *process*, not per-city.
+- Enforce `total_exposure_max_pct` in `execute()` (Σ `book.exposure_cents()` + leg ≤ pct×running
+  balance) alongside the daily-outlay cap (sums per date) — both gate the *process*, not per-city.
+  **[done 2026-06-01 — C2 fix; the original "just works" claim was false.]**
 - Keep `per_anchor_max_trades` per-market (fills counter resets per `execute` call).
 - Ensure sequential per-market `execute` accumulates exposure in the shared Book so the
   cumulative cap binds across cities within a cycle.

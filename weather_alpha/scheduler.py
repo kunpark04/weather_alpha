@@ -25,6 +25,10 @@ from weather_alpha.config import Config, MarketCfg
 
 logger = logging.getLogger(__name__)
 
+# #8: a resident bot restarting AFTER a market's 1 PM anchor must not trade hours off the edge —
+# only fire within this many minutes of the anchor; past it, skip that city for the day.
+_ANCHOR_WINDOW_MINUTES = 60
+
 
 class Action(str, Enum):
     IDLE = "idle"
@@ -183,12 +187,14 @@ class MarketAnchorScheduler:
         return now_local, anchor_at, str(today.date())
 
     def due_markets(self, markets: list[MarketCfg], now_utc: pd.Timestamp | None = None) -> list[MarketCfg]:
-        """Markets whose local anchor has passed today and that haven't fired today yet."""
+        """Markets whose local anchor has passed today, haven't fired today, AND are still within
+        the post-anchor window (#8) — a late restart must not trade hours off the 1 PM edge."""
         now_utc = now_utc if now_utc is not None else pd.Timestamp.now(tz="UTC")
+        window = pd.Timedelta(minutes=_ANCHOR_WINDOW_MINUTES)
         due = []
         for m in markets:
             now_local, anchor_at, today = self._anchor_for(m, now_utc)
-            if now_local >= anchor_at and self.last_anchor.get(m.name) != today:
+            if anchor_at <= now_local <= anchor_at + window and self.last_anchor.get(m.name) != today:
                 due.append(m)
         return due
 

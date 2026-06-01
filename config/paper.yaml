@@ -73,7 +73,8 @@ scheduler:
   predict_lookback_hours: 2
 
 risk:
-  daily_max_loss_usd: 100.0
+  daily_max_loss_usd: 15.0        # per-day stake-at-risk cap (was 100 = 4x the $25 acct); the
+                                  # % exposure cap (total_exposure_max_pct) is the primary cumulative gate
   per_anchor_max_trades: 6
   per_city_drawdown_pct: 0.25
   account_drawdown_pct: 0.50

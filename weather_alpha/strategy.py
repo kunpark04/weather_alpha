@@ -665,6 +665,10 @@ def run_wing_strategy(
 
     # Fee-aware gate (small accounts): skip if Kalshi fees would eat the entire win even
     # on the best-case leg — i.e. the trade cannot profit on any outcome.
+    # I2: max(...) is the BEST-case (largest) leg payout. For equal_payout (production) all legs
+    # have equal contracts so best == worst and this is exact; for prob_weighted/market_weighted
+    # (non-production) sizing it is a loose best-case floor, not a guaranteed-win check. Tighten
+    # to min(...) if those modes ever ship.
     if fee_aware and targets:
         from weather_alpha.fees import trade_fee_cents
         total_fee_c = sum(trade_fee_cents(t.limit_price_cents / 100.0, t.target_contracts) for t in targets)

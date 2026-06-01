@@ -33,6 +33,16 @@ from weather_alpha.pmf import parse_kalshi_subtitle
 
 logger = logging.getLogger(__name__)
 
+_MONTH_ABBR = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+
+def event_date_code(settlement_date) -> str:
+    """Kalshi event-ticker date code, e.g. '26JUN01' — LOCALE-INDEPENDENT (I1). strftime '%b'
+    is locale-dependent (a non-English LC_TIME yields a wrong month abbrev → wrong ticker);
+    year/day are numeric so strftime is safe there, only the month abbrev is hardcoded."""
+    ts = pd.Timestamp(settlement_date)
+    return f"{ts.strftime('%y')}{_MONTH_ABBR[ts.month - 1]}{ts.strftime('%d')}"
+
 
 @dataclass(frozen=True)
 class KalshiContract:
@@ -102,16 +112,13 @@ class KalshiClient:
     def __init__(self, cfg: KalshiCfg, *, authenticated: bool):
         self._cfg = cfg
         self._authenticated = authenticated
-        self._http = httpx.AsyncClient(
-            base_url=cfg.api_base,
-            timeout=cfg.request_timeout_seconds,
-            headers={"User-Agent": "weather-alpha/0.1"},
-        )
         # Kalshi signs the FULL request path, including the prefix baked into api_base
         # (e.g. "/trade-api/v2"). httpx prepends that prefix to the actual request URL,
         # so the signed string must include it too — otherwise every authenticated call
         # is signed over the wrong bytes and rejected with 401.
         self._base_path = urlsplit(cfg.api_base).path.rstrip("/")
+        # W6: validate + load credentials BEFORE opening the HTTP client, so a bad/missing key
+        # raises without leaking an already-opened client (no __aexit__ would run to close it).
         if authenticated:
             key_id = os.environ.get(cfg.key_id_env, "")
             key_path = os.environ.get(cfg.private_key_path_env, "")
@@ -124,6 +131,11 @@ class KalshiClient:
         else:
             self._key_id = ""
             self._private_key = None
+        self._http = httpx.AsyncClient(
+            base_url=cfg.api_base,
+            timeout=cfg.request_timeout_seconds,
+            headers={"User-Agent": "weather-alpha/0.1"},
+        )
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -139,7 +151,7 @@ class KalshiClient:
     async def fetch_event(self, settlement_date: pd.Timestamp,
                           event_pattern: str = "KXHIGHCHI") -> list[KalshiContract]:
         """Fetch the contracts for one settlement date's event."""
-        ticker = f"{event_pattern}-{pd.Timestamp(settlement_date).strftime('%y%b%d').upper()}"
+        ticker = f"{event_pattern}-{event_date_code(settlement_date)}"
         r = await self._http.get("/markets", params={"event_ticker": ticker})
         r.raise_for_status()
         markets = r.json().get("markets", [])
@@ -155,7 +167,10 @@ class KalshiClient:
             status = (m.get("status") or "").lower()
             contracts.append(KalshiContract(
                 ticker=m["ticker"],
-                event_ticker=ticker,
+                # #7: event_ticker from the API's OWN data (its field, else derived from the market
+                # ticker) — not the ticker we requested — so the event-date guard checks real
+                # response data and can actually catch a wrong/stale event.
+                event_ticker=(m.get("event_ticker") or "-".join(str(m.get("ticker", "")).split("-")[:2]) or ticker),
                 bucket_spec=spec,
                 subtitle=m.get("subtitle") or m.get("yes_sub_title") or "",
                 strike_type=m.get("strike_type"),
@@ -339,6 +354,12 @@ def _contract_sort_key(c: KalshiContract) -> int:
     try:
         return int(c.subtitle.split("°")[0])
     except Exception:
+        pass
+    # I3: fall back to the numeric strike before the middling 500, so a middle bucket whose
+    # subtitle lacks '°' still sorts sensibly. (Cosmetic — every consumer re-sorts by bucket bound.)
+    try:
+        return int(c.strike) if c.strike is not None else 500
+    except (TypeError, ValueError):
         return 500
 
 

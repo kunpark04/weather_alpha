@@ -151,6 +151,7 @@ class Config:
     scheduler: SchedulerCfg
     risk: RiskCfg
     ui: UICfg
+    config_path: str = ""              # resolved path this Config was loaded from (operator commands)
 
     def is_live(self) -> bool:
         return self.mode == "live"
@@ -176,8 +177,12 @@ def _abs(path_str: str) -> Path:
     return p if p.is_absolute() else (PROJECT_ROOT / p)
 
 
-def load_config(path: Path | str | None = None) -> Config:
-    """Load YAML config. Resolution order: arg > $WEATHER_ALPHA_CONFIG > default."""
+def load_config(path: Path | str | None = None, *, require_live_creds: bool = True) -> Config:
+    """Load YAML config. Resolution order: arg > $WEATHER_ALPHA_CONFIG > default.
+
+    `require_live_creds=False` skips the live Kalshi-credential check (#1) — for read-only
+    operator tools (kill.py / halt.py) that only need paths and must run from a credless shell;
+    the trading bot always loads with the check on."""
     if path is None:
         env = os.environ.get("WEATHER_ALPHA_CONFIG")
         path = Path(env) if env else DEFAULT_CONFIG_PATH
@@ -269,12 +274,13 @@ def load_config(path: Path | str | None = None) -> Config:
         scheduler=scheduler,
         risk=risk,
         ui=ui,
+        config_path=str(path),
     )
 
     if cfg.mode not in ("paper", "live"):
         raise ValueError(f"mode must be 'paper' or 'live', got {cfg.mode!r}")
     _validate_markets(cfg.markets)
-    if cfg.is_live():
+    if cfg.is_live() and require_live_creds:
         _validate_live_credentials(cfg)
 
     paths.logs_dir.mkdir(parents=True, exist_ok=True)

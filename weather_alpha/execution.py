@@ -62,21 +62,34 @@ async def execute(
     client: KalshiClient | None,
     *,
     market: MarketCfg | None = None,
+    bankroll_usd: float = 0.0,
 ) -> ExecutionResult:
     """Run execution for one anchor cycle. Mutates `book` in place. Appends log rows.
 
     `market` (multi-market) supplies the settlement station tagged onto each fill and the
     local tz for the log timestamp; when None, the legacy cfg.station/cfg.local_tz are used.
+    `bankroll_usd` (the running account balance) enables the process-wide exposure cap; when
+    0 the cap is skipped (non-engine callers) — the daily-outlay cap still applies.
     """
     _check_kill_switch(cfg)
     _check_daily_loss(cfg, book, prediction)
     station = market.station if market is not None else cfg.station
     tz = market.local_tz if market is not None else cfg.local_tz
+    # #3: for LIVE, size deltas against EXCHANGE truth (not the local Book), so a late fill /
+    # manual trade / stale snapshot can't cause over- or under-buying. One snapshot per cycle; on
+    # fetch failure fall back to the Book (live_held stays None).
+    live_held: dict[tuple[str, str], int] | None = None
+    if cfg.is_live() and client is not None:
+        try:
+            live_held = {(p.ticker, p.side): p.contracts for p in await client.get_positions()}
+        except Exception:
+            logger.exception("exposure: get_positions failed; using Book for deltas this cycle")
 
     target_by_ticker = {t.ticker: t for t in strategy.targets}
     rows: list[LogRow] = []
     fills = 0
     skipped = 0
+    attempts = 0          # #10: order ATTEMPTS placed (fill or not) — the real per-anchor backstop
     orders: list[dict] = []
 
     run_utc = pd.Timestamp.now(tz="UTC")
@@ -100,8 +113,11 @@ async def execute(
         # Target-vs-current diff. Strategy emits absolute targets ("hold 646 YES");
         # execution only fills the delta. Without this, intraday refreshes compound
         # positions on every cycle.
-        current = book.open_for(tgt.ticker, tgt.side)
-        current_qty = current.contracts if (current and not current.settled) else 0
+        if live_held is not None:
+            current_qty = live_held.get((tgt.ticker, tgt.side), 0)        # #3: exchange truth (LIVE)
+        else:
+            current = book.open_for(tgt.ticker, tgt.side)
+            current_qty = current.contracts if (current and not current.settled) else 0
         delta_qty = tgt.target_contracts - current_qty
         if delta_qty <= 0:
             rows.append(_skip_row(cfg, run_utc, t_utc, prediction, c, tgt, reason="at_target"))
@@ -122,8 +138,8 @@ async def execute(
 
         # Per-anchor trade cap (W6): never place more entries than configured,
         # whatever the strategy emits. Runaway-order backstop.
-        if fills >= cfg.risk.per_anchor_max_trades:
-            logger.error("per_anchor_max_trades=%d reached — halting before %s",
+        if attempts >= cfg.risk.per_anchor_max_trades:
+            logger.error("per_anchor_max_trades=%d reached (order attempts) — halting before %s",
                          cfg.risk.per_anchor_max_trades, c.ticker)
             rows.append(_skip_row(cfg, run_utc, t_utc, prediction, c, tgt_delta,
                                   reason="max_trades"))
@@ -149,11 +165,27 @@ async def execute(
             halted, halt_reason = True, "daily_outlay_cap"
             break
 
+        # C2 — process-wide exposure cap: cumulative OPEN stake across ALL cities (the shared
+        # Book) must stay within total_exposure_max_pct of the running balance, so N markets
+        # can't each deploy the full account. Skipped when bankroll_usd is unknown (0).
+        if bankroll_usd > 0:
+            exp_cap_cents = int(round(cfg.strategy.total_exposure_max_pct * bankroll_usd * 100))
+            if book.exposure_cents() + delta_cost_cents > exp_cap_cents:
+                logger.error("exposure cap: open %d¢ + %d¢ > %d¢ (%.0f%% of $%.2f) — halting before %s",
+                             book.exposure_cents(), delta_cost_cents, exp_cap_cents,
+                             cfg.strategy.total_exposure_max_pct * 100, bankroll_usd, c.ticker)
+                rows.append(_skip_row(cfg, run_utc, t_utc, prediction, c, tgt_delta,
+                                      reason="exposure_cap"))
+                skipped += 1
+                halted, halt_reason = True, "exposure_cap"
+                break
+
         # W4: an order-placement exception must NOT abort the cycle (which would leave a
         # half-filled wing and skip the Book save below). Catch it, record the leg as
         # errored, and stop placing further legs. Already-filled legs are persisted by the
         # book.save below; the deterministic wa- client_order_id (C4) makes a next-cycle
         # retry of an unbooked leg idempotent at the exchange.
+        attempts += 1   # #10: a submitted order consumes the cap whether or not it fills
         try:
             fill = await _execute_one(cfg, c, tgt_delta, client, anchor_date=anchor_iso)
         except Exception:
@@ -229,9 +261,13 @@ async def _execute_one(cfg: Config, c: KalshiContract, tgt: TargetPosition,
         # C4 — deterministic idempotency key: the same logical leg on the same anchor
         # date always yields the same client_order_id, so a retry or a re-run of the
         # cycle collides on Kalshi's uniqueness check instead of doubling the position.
+        # W3 trade-off: on a PARTIAL fill, next cycle retries the remainder with this SAME coid
+        # + a new count — Kalshi may reject it (remainder unplaced) rather than double-fill. We
+        # keep the safe under-fill; a unique-per-attempt coid would place the remainder but
+        # reintroduce double-order risk. Revisit with a live partial-fill test before changing.
         coid = f"wa-{anchor_date}-{tgt.ticker}-{tgt.side}"
         # Snapshot true exchange holdings BEFORE the order so we can measure the real fill.
-        before_qty, _ = await _live_held(client, tgt.ticker, tgt.side)
+        before_qty, before_avg = await _live_held(client, tgt.ticker, tgt.side)
         ack = await client.place_order(
             ticker=tgt.ticker, side=tgt.side, action="buy",
             count=tgt.target_contracts, limit_price_cents=tgt.limit_price_cents,
@@ -243,16 +279,27 @@ async def _execute_one(cfg: Config, c: KalshiContract, tgt: TargetPosition,
         # Book's delta logic stays correct because we never recorded a phantom fill).
         filled, price_cents = 0, tgt.limit_price_cents
         for _attempt in range(_FILL_POLL_TRIES):
-            after_qty, avg_cents = await _live_held(client, tgt.ticker, tgt.side)
+            after_qty, after_avg = await _live_held(client, tgt.ticker, tgt.side)
             filled = max(0, after_qty - before_qty)
             if filled > 0:
-                price_cents = avg_cents if avg_cents > 0 else tgt.limit_price_cents
+                # #6: marginal price of THIS fill (back out the pre-order holding), not the blended
+                # post-order average — else topping up an existing holding books a blended avg.
+                marginal = (after_qty * after_avg - before_qty * before_avg) / filled
+                price_cents = int(round(marginal)) if marginal > 0 else tgt.limit_price_cents
                 break
             if _attempt + 1 < _FILL_POLL_TRIES:
                 await asyncio.sleep(_FILL_POLL_DELAY_S)
         if filled <= 0:
-            logger.warning("LIVE order %s (id=%s) placed but no fill observed after %d "
-                           "polls; leaving unbooked to retry next cycle",
+            # #4: cancel the resting order so it can't fill LATER (after the Book has saved),
+            # silently diverging Book from exchange. Best-effort: if it filled in the race the
+            # cancel errors harmlessly and the #3 exchange-truth delta corrects sizing next cycle.
+            oid = ack.get("order_id") or (ack.get("order") or {}).get("order_id")
+            try:
+                if oid:
+                    await client.cancel_order(oid)
+            except Exception:
+                logger.exception("LIVE: cancel of unfilled order %s (id=%s) failed", tgt.ticker, oid)
+            logger.warning("LIVE order %s (id=%s) no fill after %d polls; cancelled, retry next cycle",
                            tgt.ticker, coid, _FILL_POLL_TRIES)
             return None
         if filled < tgt.target_contracts:
@@ -263,6 +310,9 @@ async def _execute_one(cfg: Config, c: KalshiContract, tgt: TargetPosition,
             "side":              tgt.side,
             "contracts":         filled,
             "fill_price_cents":  price_cents,
+            # W2: FORMULA fee, not Kalshi's actually-charged fee (they can differ slightly). The
+            # post-settlement get_balance() re-sync reconciles the true balance; this per-position
+            # fee stays an estimate until we read the exchange fee from fills (HANDOFF AUDIT #8).
             "fee_cents":         trade_fee_cents(price_cents / 100.0, filled),
             "kalshi_order_id":   ack.get("order_id"),
             "ack":               ack,
@@ -323,7 +373,10 @@ def _check_kill_switch(cfg: Config) -> None:
 
 
 def _check_daily_loss(cfg: Config, book: Book, prediction: Prediction) -> None:
-    """Refuse to open new positions if today's realized loss exceeds the cap."""
+    """Pre-cycle gate on REALIZED loss for this anchor date. W5 note: realized loss accrues only
+    at settlement (next-day for a daily market), so for the CURRENT anchor this is ~always 0 at
+    decision time — the real same-day stops are the intraday outlay breaker (C3) + the exposure
+    cap (C2), not this. Kept as a belt-and-suspenders for an already-settled date."""
     date_iso = str(prediction.date.date())
     daily = book.daily_loss_cents.get(date_iso, 0)
     cap_cents = -int(round(cfg.risk.daily_max_loss_usd * 100))

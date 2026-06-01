@@ -139,8 +139,13 @@ async def _run_market_loop(cfg, art, book, kalshi) -> int:
                 results = await run_cycle(cfg, art, book, kalshi, markets=due)
                 for result in results:
                     _print_summary(result)
+                # #2: record ONLY markets that produced a result. run_cycle drops a market that
+                # threw (per-market isolation), so an errored city stays un-recorded and retries
+                # next tick instead of being silently skipped until tomorrow.
+                done = {r.diagnostics.get("market") for r in results}
                 for m in due:
-                    sched.record(m)
+                    if m.name in done:
+                        sched.record(m)
             sleep_s = max(1.0, min(sched.seconds_until_next(cfg.markets), 300.0))
             await asyncio.sleep(sleep_s)
     except KeyboardInterrupt:

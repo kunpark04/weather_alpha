@@ -5,11 +5,11 @@ that city (or the whole account) places no new trades until reset here. Settleme
 existing positions still runs while halted. The halt state lives in the Book
 (paths.positions_snapshot), so this always matches what the running bot enforces.
 
-Usage (run from project root):
-    python scripts/halt.py --status                       # show halts + per-city drawdown
-    python scripts/halt.py --reset                        # clear account halt + ALL city halts
-    python scripts/halt.py --reset KMDW                   # clear one city's halt
-    python scripts/halt.py --status --config config/central_live.yaml
+Usage (run from project root) — --config is REQUIRED and MUST be the RUNNING bot's config,
+because halt state lives in that config's positions.json (data/live/, data/paper/, ...):
+    python scripts/halt.py --status --config config/live.yaml      # show halts + per-city drawdown
+    python scripts/halt.py --reset --config config/live.yaml       # clear account + ALL city halts
+    python scripts/halt.py --reset KMDW --config config/live.yaml  # clear one city's halt
 """
 
 from __future__ import annotations
@@ -44,10 +44,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reset", nargs="?", const="__ALL__", metavar="STATION",
                     help="clear a halt: no arg = account + ALL cities; STATION = just that city")
     ap.add_argument("--status", action="store_true", help="show halts + drawdown without changing state")
-    ap.add_argument("--config", default=None, help="config path override")
+    ap.add_argument("--config", required=True,
+                    help="REQUIRED — the running bot's config (e.g. config/live.yaml); halt "
+                         "state is read from its positions.json so it MUST match the live bot")
     args = ap.parse_args(argv)
 
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, require_live_creds=False)   # #1: reset halts even from a credless shell
     book = Book.load(cfg.paths.positions_snapshot)
 
     if args.reset is not None:

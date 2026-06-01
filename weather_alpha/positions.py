@@ -54,15 +54,20 @@ class Book:
                  fee_cents: int, bucket_spec: str, opened_utc: str, anchor_date: str,
                  station: str = "") -> None:
         key = self._key(ticker, side)
-        if key in self.positions:
-            p = self.positions[key]
-            total_cost = p.contracts * p.avg_cost_cents + contracts * fill_cents
-            p.contracts += contracts
-            p.avg_cost_cents = total_cost / max(p.contracts, 1)
-            p.total_fees_cents += fee_cents
-            if not p.station and station:
-                p.station = station
+        existing = self.positions.get(key)
+        if existing is not None and not existing.settled:
+            total_cost = existing.contracts * existing.avg_cost_cents + contracts * fill_cents
+            existing.contracts += contracts
+            existing.avg_cost_cents = total_cost / max(existing.contracts, 1)
+            existing.total_fees_cents += fee_cents
+            if not existing.station and station:
+                existing.station = station
         else:
+            # New position, OR the prior one at this key is already SETTLED (W1): its realized
+            # PnL is already banked in realized_pnl_cents, so start a FRESH position rather than
+            # mutating a settled row. Latent today (tickers are date-unique) but defensive.
+            if existing is not None:
+                logger.warning("add_fill on a settled position %s — opening a fresh position", key)
             self.positions[key] = Position(
                 ticker=ticker,
                 side=side,
@@ -104,7 +109,8 @@ class Book:
         settlement. Used by the intraday circuit breaker (C3): daily_loss_cents only
         accrues at next-day settlement, so stake-at-risk is the honest same-day proxy."""
         return sum(int(p.contracts * p.avg_cost_cents)
-                   for p in self.positions.values() if p.anchor_date == anchor_date)
+                   for p in self.positions.values()
+                   if p.anchor_date == anchor_date and not p.settled)   # W7: open stake only
 
     def open_for(self, ticker: str, side: str) -> Position | None:
         return self.positions.get(self._key(ticker, side))
@@ -130,6 +136,8 @@ class Book:
             self.city_hwm_cents = {s: self.realized_for_station(s)
                                    for s in {p.station for p in self.positions.values() if p.station}}
         elif station in self.halted_stations:
+            # I6: clearing ONE city intentionally leaves the account-level halt + HWM intact —
+            # a single city's reset shouldn't lift a whole-account stop. Use reset_halt(None).
             self.halted_stations.remove(station)
             self.city_hwm_cents[station] = self.realized_for_station(station)
 
@@ -142,7 +150,8 @@ class Book:
         Returns human-readable labels of any NEWLY-latched halt (for the terminal reporter)."""
         newly: list[str] = []
         if balance_cents <= 0:
-            return newly
+            return newly   # I4: at <=0 balance the threshold is 0 and sizing emits nothing anyway,
+            #                   so a NEW halt is moot; any already-latched halt still persists.
         acct = self.realized_pnl_cents
         self.account_hwm_cents = max(self.account_hwm_cents, acct)
         if not self.account_halted and (self.account_hwm_cents - acct) >= account_pct * balance_cents:

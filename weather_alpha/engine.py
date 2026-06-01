@@ -19,7 +19,7 @@ from weather_alpha.config import Config, MarketCfg
 from weather_alpha.data import DataBundle, latest_viable_anchor, load_bundle, refresh_live
 from weather_alpha.execution import ExecutionResult, KillSwitchTripped, execute, reconcile_settlements
 from weather_alpha.features import build_features
-from weather_alpha.kalshi import KalshiClient
+from weather_alpha.kalshi import KalshiClient, event_date_code
 from weather_alpha.live_fetchers import fetch_live_cli
 from weather_alpha.model import ModelArtifacts, Prediction, predict_for_anchor
 from weather_alpha.pmf import INTEGER_F_GRID
@@ -98,6 +98,9 @@ async def run_cycle(
         bundle = load_bundle(cfg.paths.data_dir, cfg.station)
 
     target_markets = markets if markets is not None else cfg.markets
+    # W4: latch any pre-existing drawdown BEFORE trading, so the first city is gated too.
+    _latch_halts(cfg, book)
+
     results: list[CycleResult] = []
     total_realized = 0
     for market in target_markets:
@@ -112,18 +115,16 @@ async def run_cycle(
             continue
         results.append(r)
         total_realized += r.realized_at_settle
+        # W4: re-latch after THIS market's settlement so an account-level stop it trips halts
+        # the REMAINING cities this same cycle (each market checks is_halted before deciding).
+        _latch_halts(cfg, book)
 
-    # One post-settlement bankroll re-sync for the whole process (LIVE only; PAPER no-op).
+    # Post-settlement bankroll re-sync (LIVE only; PAPER no-op), then a final re-latch against
+    # the resynced balance. I7: net-zero realized => settlements offset => cash balance unchanged,
+    # so skipping the re-sync is correct (it would re-fetch the same balance); self-heals next time.
     if total_realized:
         await _resync_bankroll_after_settlement(cfg, book, kalshi)
-    # Drawdown circuit-breakers: refresh peaks + latch halts vs the RUNNING account balance.
-    balance_cents = (book.bankroll_cents if (cfg.is_live() and book.bankroll_cents is not None)
-                     else int(round(_current_bankroll(cfg, book) * 100)))
-    for label in book.update_drawdown_halts(balance_cents, cfg.risk.per_city_drawdown_pct,
-                                            cfg.risk.account_drawdown_pct):
-        logger.critical("DRAWDOWN HALT latched: %s", label)
-        report(f"⛔ HALT LATCHED — {label}; stays halted until you reset it "
-               f"(python scripts/halt.py --reset)")
+        _latch_halts(cfg, book)
     book.save(cfg.paths.positions_snapshot)
     return results
 
@@ -171,7 +172,8 @@ async def _run_one_market(
         scope = "account" if book.account_halted else "city"
         reason = f"{scope} drawdown halt (>= {pct:.0%} of running account)"
         logger.warning("[%s] HALTED — %s; no new trades until reset", market.name, reason)
-        report(f"{tag} ⛔ HALTED — {reason}; reset: python scripts/halt.py --reset {market.station}")
+        report(f"{tag} ⛔ HALTED — {reason}; reset: "
+               f"python scripts/halt.py --reset {market.station} --config {cfg.config_path}")
         strat = StrategyOutput(targets=[], diagnostics={"halted": reason})
     elif skip_reason is not None:
         # W3: refuse to open into a closed / not-yet-open / mismatched event, said explicitly
@@ -186,7 +188,8 @@ async def _run_one_market(
 
     try:
         exec_result = await execute(cfg, pred, contracts, strat, book,
-                                    kalshi if cfg.is_live() else None, market=market)
+                                    kalshi if cfg.is_live() else None, market=market,
+                                    bankroll_usd=bankroll)
     except KillSwitchTripped as e:
         # #5: the kill switch / daily-loss cap blocks NEW ORDERS only — settlement of
         # prior-day positions (below) and the bankroll re-sync must still run.
@@ -300,7 +303,7 @@ def _tradeable_contracts(contracts: list, anchor: pd.Timestamp) -> tuple[list, s
     live = [c for c in contracts if c.is_live]
     if not live:
         return [], "no live contracts (event closed or not yet open)"
-    expected_code = anchor.strftime("%y%b%d").upper()           # e.g. 26MAY30, as built by fetch_event
+    expected_code = event_date_code(anchor)                     # e.g. 26MAY30, as built by fetch_event (I1: locale-safe)
     if not any(expected_code in (c.event_ticker or "") for c in live):
         return [], (f"resolved event {{{','.join(sorted({c.event_ticker for c in live}))}}} "
                     f"does not match anchor date {expected_code}")
@@ -317,12 +320,14 @@ def _current_bankroll(cfg: Config, book: Book) -> float:
     LIVE: the real Kalshi cash balance, verified at activation and re-synced after
     each settlement (`book.bankroll_cents`; see `verify_bankroll`). The configured
     `bankroll_usd` is only a hint in LIVE.
-    PAPER: starting bankroll + realized PnL − fees paid (no exchange to query).
+    PAPER: starting bankroll + realized PnL (already net of fees via settle; no exchange to query).
     """
     if cfg.is_live() and book.bankroll_cents is not None:
         return max(0.0, book.bankroll_cents / 100.0)
-    realized = book.realized_pnl_cents - book.fees_paid_cents
-    return max(0.0, cfg.strategy.bankroll_usd + realized / 100.0)
+    # #5: realized_pnl_cents is ALREADY net of fees (Book.settle subtracts total_fees_cents); do
+    # NOT subtract fees_paid_cents again — that double-counted settled fees and understated the
+    # paper bankroll (skewing sizing / exposure / drawdown thresholds).
+    return max(0.0, cfg.strategy.bankroll_usd + book.realized_pnl_cents / 100.0)
 
 
 async def verify_bankroll(cfg: Config, book: Book, client: KalshiClient) -> None:
@@ -365,6 +370,21 @@ async def _resync_bankroll_after_settlement(cfg: Config, book: Book, client: Kal
         logger.info("LIVE bankroll re-synced after settlement: $%.2f", bal / 100.0)
     except Exception:
         logger.exception("post-settlement balance refresh failed; keeping prior bankroll")
+
+
+def _latch_halts(cfg: Config, book: Book) -> None:
+    """Refresh drawdown peaks + latch per-city/account halts against the running balance,
+    reporting any newly-latched halt. Called before the market loop and after each market's
+    settlement so an account-level stop halts the remaining cities in the same cycle (W4)."""
+    # I5: both the threshold base (balance) and the drawdown numerator (realized, via
+    # update_drawdown_halts) are ~net of fees, so the convention is consistent to second order.
+    balance_cents = (book.bankroll_cents if (cfg.is_live() and book.bankroll_cents is not None)
+                     else int(round(_current_bankroll(cfg, book) * 100)))
+    for label in book.update_drawdown_halts(balance_cents, cfg.risk.per_city_drawdown_pct,
+                                            cfg.risk.account_drawdown_pct):
+        logger.critical("DRAWDOWN HALT latched: %s", label)
+        report(f"⛔ HALT LATCHED — {label}; stays halted until you reset it "
+               f"(python scripts/halt.py --reset --config {cfg.config_path})")
 
 
 async def settle_market_if_due(cfg: Config, market: MarketCfg, book: Book) -> int:

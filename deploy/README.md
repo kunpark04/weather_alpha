@@ -124,3 +124,86 @@ CRON_TZ=America/Chicago
 5 13 * * *  set -a; . /opt/weather-alpha/secrets/kalshi.env; set +a; cd /opt/weather-alpha && .venv/bin/python -m weather_alpha --headless >> /opt/weather-alpha/logs/cron.log 2>&1
 ```
 The systemd timer is preferred (TZ-aware, journal logs, catch-up via `Persistent=`).
+
+---
+
+# Two-instance local setup — Chicago LIVE + Houston PAPER (`systemd --user`)
+
+Two **independent** one-shot instances on a local Linux box (no root): Chicago in LIVE mode,
+Houston in PAPER, each with **isolated state** (`data/chicago/` vs `data/houston/`), both firing
+**right at 1:00 PM America/Chicago** (the anchor — `AccuracySec=1s`; the cycle runs in ~10 s). The single bot is
+single-market/single-mode, so "Chicago live + Houston paper" = two processes, not one — and two
+processes give clean live/paper segregation (no shared `positions.json`/bankroll to corrupt).
+Units: `deploy/weather-alpha-{chicago,houston}.{service,timer}` (the `--user` variant of the
+system template above).
+
+```bash
+# clone assumed at ~/weather-alpha (else edit WorkingDirectory in the .service files); venv at .venv
+mkdir -p ~/weather-alpha/data/chicago ~/weather-alpha/data/houston \
+         ~/weather-alpha/logs/chicago ~/weather-alpha/logs/houston
+
+# Chicago needs the read-WRITE creds (Houston paper needs none):
+mkdir -p -m 700 ~/weather-alpha/secrets
+cat > ~/weather-alpha/secrets/kalshi-rw.env <<'EOF'
+KALSHI_KEY_ID=<your read-write key id>
+KALSHI_PRIVATE_KEY_PATH=/home/<you>/secrets/readwrite-private-key.pem
+EOF
+chmod 600 ~/weather-alpha/secrets/kalshi-rw.env
+
+# install the user units + allow timers to run when logged out:
+cp deploy/weather-alpha-chicago.service deploy/weather-alpha-chicago.timer \
+   deploy/weather-alpha-houston.service deploy/weather-alpha-houston.timer ~/.config/systemd/user/
+loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+
+# start PAPER now (safe); start LIVE only when ready for real orders:
+systemctl --user enable --now weather-alpha-houston.timer
+systemctl --user enable --now weather-alpha-chicago.timer      # <-- the go-live switch
+systemctl --user list-timers 'weather-alpha-*'
+journalctl --user -u weather-alpha-chicago.service -f          # watch a fire
+```
+
+- **`Persistent=false` on Chicago (LIVE)** — a missed run is skipped rather than caught up late
+  (avoids an off-anchor REAL trade; the next run still settles any pending prior-day position).
+  Houston uses `Persistent=true` (catch-up is harmless in paper).
+- **Two kill switches:** `data/chicago/KILL_SWITCH` and `data/houston/KILL_SWITCH`
+  (`python scripts/kill.py --config config/chicago_live.yaml`, likewise for Houston).
+- **Manual test before scheduling:** `…/.venv/bin/python -m weather_alpha --headless --config config/houston_paper.yaml`
+  (paper, safe); same with `chicago_live.yaml` + the RW env to go live by hand.
+
+---
+
+# Option B — one RESIDENT bot per mode, across ALL US timezones (multi-market)
+
+The two-instance setup above is one process *per city*. The **resident multi-market bot** is
+the other shape the engine supports: **one** long-running process per *mode* that trades a whole
+**list** of cities (any US timezone) from a single `markets:` config, firing each city at ITS OWN
+local 1 PM. One LIVE process for every live city + one PAPER process for every paper city. No
+per-city timers — the process sleeps until the next city's anchor (capped at 5 min) and wakes to
+trade it; live/paper stays cleanly separated because mode is a per-process property.
+
+Configs: **`config/live.yaml`** (`mode: live`, a `markets:` list) and **`config/paper.yaml`**.
+Add a city by appending one line to `markets:` — `{name, event_pattern, station, local_tz}` (use
+the EXACT IANA tz, incl. no-DST `America/Phoenix`). Units:
+`deploy/weather-alpha-{live,paper}.service` (resident `--loop`, `Restart=on-failure`).
+
+```bash
+mkdir -p ~/weather-alpha/data/live ~/weather-alpha/data/paper \
+         ~/weather-alpha/logs/live ~/weather-alpha/logs/paper
+# LIVE creds in secrets/kalshi-rw.env (same as the two-instance setup above).
+cp deploy/weather-alpha-live.service deploy/weather-alpha-paper.service ~/.config/systemd/user/
+loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+systemctl --user enable --now weather-alpha-paper.service     # safe; resident paper bot
+systemctl --user enable --now weather-alpha-live.service      # <-- go-live (REAL orders)
+journalctl --user -u weather-alpha-live.service -f            # watch the ENTER/FILLED/SETTLED lines
+```
+
+- **Drawdown halts (latched):** a city stops at **25%** drawdown of the running account; the whole
+  account stops at **50%**; both stay halted (settlement still runs) until you clear them:
+  `python scripts/halt.py --status --config config/live.yaml` / `--reset [STATION]`.
+- **NTP required** (`sudo timedatectl set-ntp true`) so each city's 1 PM is real-time accurate.
+- **A vs B are interchangeable on the same engine** — A (per-city one-shot timers) is simplest for
+  a single timezone; B (this resident bot) is the single "one bot for all live cities" the
+  multi-market refactor was built for. **Don't run BOTH for the same city** (they'd double-trade) —
+  pick one shape per city.

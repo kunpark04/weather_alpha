@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -78,6 +79,20 @@ class ExecutionCfg:
 
 
 @dataclass(frozen=True)
+class MarketCfg:
+    """One tradeable market = one city's daily-high event. A process trades a list of these.
+
+    A single-market (legacy) config synthesizes exactly one of these from the top-level
+    `station`/`local_tz` + `execution.market_event_pattern`; a multi-market config lists
+    them explicitly under `markets:`.
+    """
+    name: str            # short tag, e.g. "CHI"/"chicago" — keys per-city state + terminal lines
+    event_pattern: str   # Kalshi event-ticker prefix, e.g. "KXHIGHCHI"
+    station: str         # NWS settlement station, e.g. "KMDW"
+    local_tz: str        # IANA tz of the city's 1 PM anchor, e.g. "America/Chicago"
+
+
+@dataclass(frozen=True)
 class KalshiCfg:
     api_base: str
     key_id_env: str
@@ -110,6 +125,9 @@ class SchedulerCfg:
 class RiskCfg:
     daily_max_loss_usd: float
     per_anchor_max_trades: int
+    # Drawdown circuit-breakers — fractions of the RUNNING account (logic wired in Phase 3).
+    per_city_drawdown_pct: float = 0.25   # halt ONE city at 25% drawdown from its peak
+    account_drawdown_pct: float = 0.50    # halt ALL cities at 50% account drawdown from peak
 
 
 @dataclass(frozen=True)
@@ -121,8 +139,9 @@ class UICfg:
 @dataclass(frozen=True)
 class Config:
     mode: Mode
-    station: str
-    local_tz: str
+    station: str                       # legacy scalar (== markets[0].station); kept for back-compat
+    local_tz: str                      # legacy scalar (== markets[0].local_tz); kept for back-compat
+    markets: tuple[MarketCfg, ...]     # the cities this process trades (always >= 1)
     paths: Paths
     model: ModelCfg
     strategy: StrategyCfg
@@ -193,7 +212,43 @@ def load_config(path: Path | str | None = None) -> Config:
         name=raw["strategy"].get("name", "joint_kelly"),
         wing=wing,
     )
-    execution = ExecutionCfg(**raw["execution"])
+    # --- markets: multi-market list, with single-market back-compat ----------------
+    exec_raw = raw["execution"]
+    raw_markets = raw.get("markets")
+    if raw_markets:
+        markets = tuple(
+            MarketCfg(
+                name=str(m["name"]),
+                event_pattern=str(m["event_pattern"]),
+                station=str(m["station"]),
+                local_tz=str(m["local_tz"]),
+            )
+            for m in raw_markets
+        )
+        # legacy scalars stay populated (== first market) for any not-yet-migrated reader
+        legacy_station = raw.get("station") or markets[0].station
+        legacy_tz = raw.get("local_tz") or markets[0].local_tz
+        event_pattern = exec_raw.get("market_event_pattern") or markets[0].event_pattern
+    else:
+        # legacy single-market config: synthesize exactly one market from the top-level scalars
+        legacy_station = raw["station"]
+        legacy_tz = raw["local_tz"]
+        event_pattern = exec_raw["market_event_pattern"]
+        markets = (
+            MarketCfg(
+                name=str(raw.get("market_name", legacy_station)),
+                event_pattern=event_pattern,
+                station=legacy_station,
+                local_tz=legacy_tz,
+            ),
+        )
+
+    execution = ExecutionCfg(
+        fill_model=exec_raw["fill_model"],
+        slippage_cents=int(exec_raw["slippage_cents"]),
+        intraday_refresh_minutes=int(exec_raw["intraday_refresh_minutes"]),
+        market_event_pattern=event_pattern,
+    )
     kalshi = KalshiCfg(**raw["kalshi"])
     data = DataCfg(**raw["data"])
     scheduler = SchedulerCfg(**raw["scheduler"])
@@ -202,8 +257,9 @@ def load_config(path: Path | str | None = None) -> Config:
 
     cfg = Config(
         mode=raw["mode"],
-        station=raw["station"],
-        local_tz=raw["local_tz"],
+        station=legacy_station,
+        local_tz=legacy_tz,
+        markets=markets,
         paths=paths,
         model=model,
         strategy=strategy,
@@ -217,6 +273,7 @@ def load_config(path: Path | str | None = None) -> Config:
 
     if cfg.mode not in ("paper", "live"):
         raise ValueError(f"mode must be 'paper' or 'live', got {cfg.mode!r}")
+    _validate_markets(cfg.markets)
     if cfg.is_live():
         _validate_live_credentials(cfg)
 
@@ -237,3 +294,26 @@ def _validate_live_credentials(cfg: Config) -> None:
         )
     if not Path(key_path_str).exists():
         raise FileNotFoundError(f"Kalshi private key not found at {key_path_str}")
+
+
+def _validate_markets(markets: tuple[MarketCfg, ...]) -> None:
+    """Fail fast on a malformed market list so the engine can safely trade ANY set of
+    US-tz cities. Names + event patterns must be unique (they key per-city state and the
+    trades themselves), and every local_tz must be a real IANA zone — a typo there would
+    silently mis-time a trade, so we reject it at load."""
+    if not markets:
+        raise ValueError("config defines no markets")
+    names = [m.name for m in markets]
+    if len(set(names)) != len(names):
+        raise ValueError(f"duplicate market names (they key per-city state): {names}")
+    patterns = [m.event_pattern for m in markets]
+    if len(set(patterns)) != len(patterns):
+        raise ValueError(f"duplicate market event_patterns: {patterns}")
+    for m in markets:
+        try:
+            ZoneInfo(m.local_tz)
+        except Exception as e:  # surface any tz-db failure as a clear config error
+            raise ValueError(
+                f"market {m.name!r}: invalid IANA timezone {m.local_tz!r} "
+                f"(expected e.g. 'America/Chicago', 'America/New_York', 'America/Phoenix')"
+            ) from e

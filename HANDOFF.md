@@ -180,6 +180,32 @@ where  f_stake = min(kelly_full × kelly_fraction × throttle, total_exposure_ma
 
 ---
 
+### 2.1 Sizing-mode study — flat $ vs %-of-bankroll vs Kelly (2026-05-31)
+
+Chicago @ 1 PM, fee-aware, in-sample ~25 fires (`scripts/sizing_modes.py`; $2.50 == 10% of the $25 start, so the first bet matches):
+
+| sizing | final $ (from $25) | return | maxDD % |
+|---|---|---|---|
+| flat $2.50 | 33.44 | +33.8% | 6.8% |
+| 5% of bankroll | 30.44 | +21.8% | 5.0% |
+| 10% of bankroll | 34.94 | +39.8% | 10.7% |
+| 25% of bankroll | 56.42 | +125.7% | 26.7% |
+
+- **Loss profile under current prod (flat $2.50): uniform full-stake losses.** A wing loss is always a *full* miss (truth outside the 2 buckets → forfeit the whole stake; held to settlement, no partial recovery). Flat-$ pins every bet to ~3 contracts (~$2.2–2.6 deployed), so **every loss is ~−$2.3 to −$2.5 — there are no "small" losses.** What varies day-to-day is the **win** size: +$0.2 (expensive wing) to +$0.7 (cheap wing), since win margin = (1 − cost). The Chicago log bears it out: 25 fires → 24 wins of +$0.2–0.7 and **one** loss of −$2.26. (The ~−$1 "small losses" appear only under the *old* Kelly/throttle sizing, where the **bet** varied — they do **not** occur in current prod.)
+- **flat → % doesn't improve the *deal*** — the return/drawdown ratio is ~fixed (≈4–5). % sizing only (a) **compounds** (geometric growth if the edge persists over many fires) and (b) makes per-trade risk **float** with the bankroll (the fixed-$ loss cap dissolves).
+- **Kelly is the trap.** Full-Kelly ≈ **79%** of bankroll at the *measured* 96% coverage, but it is hyper-sensitive to the win rate — the thin 67-day estimate is the whole exposure:
+
+| true coverage | full-Kelly | 25% of bankroll is |
+|---|---|---|
+| 96% (measured) | ~79% | ⅓ Kelly (sub) |
+| 90% | ~47% | ½ Kelly |
+| ~86% | ~25% | = full Kelly (cliff) |
+| 82% | ~4% | ~6× → geometric ruin |
+
+**Discipline (load-bearing):** stay on **flat $2.50** through the forward-confirmation phase — fixed, nameable risk and a clean read on whether 96% is real. Scale only *after* the edge is confirmed forward, and even then use a modest fractional % (≪25%): most of the growth, a fraction of the drawdown. The high win rate makes aggressive sizing tempting **and** most fragile; compounding an unconfirmed edge amplifies the estimation error geometrically.
+
+---
+
 ## 3. Pipeline / execution order (every gate, no hidden filters)
 
 | # | Stage | What | Skip reason if failed |
@@ -287,6 +313,7 @@ Expected: 22 fires, +$308 PnL, 20/2 W/L. Positions land in `data/prod_backtest_p
 | KILL | **Kill switch no longer freezes settlement** | ✅ DONE 2026-05-31. Arming the kill switch (or hitting the daily-loss cap) raised `KillSwitchTripped` at the top of `execute()`, which `run_cycle` let propagate **before** the settlement block — so a halted bot also stopped settling prior-day positions and re-syncing bankroll. Fix: `run_cycle` catches `KillSwitchTripped`, records a no-trade `ExecutionResult`, and falls through to settlement; new orders stay blocked (execute raises before placing anything). Verified: armed switch → 0 new fills but the prior-day position settles (+119¢ in the test). |
 | AUDIT | **2026-05-31 live-path audit — remaining findings** | 8-finding engine audit this session. Fixed: #1/#2 auth + portfolio schema (**AUTH**), #5 kill-switch vs settlement (**KILL**). Already tracked: #3 late-fill booking + #7 no cycle-start reconcile (**RECON**/L3; `README_PROD` known-limit #2), #6 TUI duplicate driver (**TUI**). Open, low severity: **#4** the one-shot catch-up can trade off-anchor if a missed run fires late while the event is still open (documented in `deploy/weather-alpha.timer`; opt out via `Persistent=false`); **#8** the intraday outlay cap (`Book.daily_outlay_cents` vs `daily_max_loss_usd`) counts contract cost but not fees — immaterial at flat-$2.50 on $25 vs a $100 cap, and the realized daily-loss gate already includes fees. |
 | AGREE | **Model–market agreement as a fire-gate / sizing signal (deferred 2026-05-31, user-parked)** | Backlog — own task. The original production strategy *required* agreement (`model_modal == market_modal`): 22 fires, 91% WR, +$308, **Sharpe 2.85** (vs `market_wing` 1.66); agreement days showed ~100% Top-3 coverage (see §1.3, §4/§10.3). Dropped in the 2026-05-29 model-free pivot for **ops simplicity, NOT lack of edge**. Two uses to test: **(a) gate** (fire only on agreement, as before), **(b) size up** on agreement days. **Decide first:** is agreement *orthogonal* to the market price (v3 uses HRRR/METAR the market may underweight) or *redundant* with high `sum_asks` (already priced → no edge, per the 2026-05-31 calibration + sizing tests in `scripts/sum_calibration.py`, `size_by_sum.py`, `confidence_test.py`)? Decisive test (Chicago, via v3 artifacts): does agreement raise wing coverage at **fixed `sum_asks`**? **Caveats:** Chicago-only (v3 is KMDW-specific; other cities need their own models); reintroduces the weather/model stack the model-free pivot removed; the 2.85 Sharpe was 22 days → OOS-validate like everything else. |
+| MULTIMKT | **Multi-market refactor — one resident bot for all live cities (+ one paper bot)** | ✅ BUILT + UNIT-TESTED 2026-06-01 (Phases 1–6; plan [`tasks/multimarket_refactor_plan.md`](tasks/multimarket_refactor_plan.md)). Engine trades a **`markets:` list** under one shared Book/bankroll (mode is per-process → no live/paper mixing); **per-station settlement** (each city resolves vs its own CLI station); **drawdown halts** — per-city **25%** / whole-account **50%** of the *running* balance, latched from the peak until reset (`scripts/halt.py`); **terminal reporter** (`weather_alpha/report.py`: ENTER/SKIP/FILLED/SETTLED/HALTED lines); **`MarketAnchorScheduler`** fires each city at *its own* local 1 PM across any US tz from one resident `--headless --loop` process (model-free path; the single-tz `Scheduler` still serves the model path). New files: `report.py`, `config/{live,paper}.yaml`, `deploy/weather-alpha-{live,paper}.service`, `scripts/halt.py`, `tests/test_multimarket.py` (14 tests pass; run directly or `pip install -e .[dev]` for pytest). **Sizing unchanged — flat $2.50** (drawdown stops are an orthogonal gate, not a sizing change). Back-compat: `chicago_live.yaml`/`houston_paper.yaml` (single-market, Option A per-tz one-shot timers) still load + run. **Phase 7 (pending, user):** run the PAPER bot (`config/paper.yaml`, add a 2nd-tz city) ~1 week before migrating any city LIVE. **Doc TODO on rollout:** refresh CLAUDE.md §2 (still says "single-market"). |
 | L2 | **Go live** | ⏳ IN PROGRESS 2026-05-31. Kalshi RSA creds wired + **validated live** (read-only `scripts/check_kalshi_auth.py` PASSES with both RO and RW keys). Two LIVE-blocking auth bugs found & fixed first (see **AUTH**). Remaining before unattended live: a `mode: live` dry-run + an always-on host. On activation the engine verifies the real bankroll from `get_balance()` — config `$25` is only a hint. |
 | L3 | **Deeper reconciliation (post-first-trade)** | ✅ Mostly DONE 2026-05-30 (commits `1c6b679`, `292fd5d`): bankroll verified from `get_balance` at activation + re-synced after settlement (W1/W5); scheduler state persisted across restart (W2); event-selection guard (W3); per-leg `place_order` error handling (W4). **Still TODO:** see the **RECON** row below (Book↔exchange reconciliation, the C1/W5 tail) + a write-ahead order-intent log (I1). |
 | D1 | **Model-free server is self-contained** | ✅ DONE 2026-05-30 (commit `ff4101c`): a model-free run needs **no model artifacts and no weather/herbie stack**. `refresh_data` no-ops; `run_cycle` drops `load_bundle`; new `engine.settle_if_due` pulls the CLI high on demand only when a prior-day position is unsettled (`anchor_date < today`); new `engine.preflight` = read-only activation snapshot (wallet/positions/market/strategy). `requests` moved to base deps. Verified on a Python 3.14 venv (18/18 imports; e2e cycle with neither `data_dir` nor `model_dir`). |

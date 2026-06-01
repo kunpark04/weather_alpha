@@ -55,6 +55,9 @@ def run(argv: list[str] | None = None) -> int:
     logger.info("loaded book: %d open / %d total positions, realized=%+d¢",
                 sum(1 for p in book.positions.values() if not p.settled),
                 len(book.positions), book.realized_pnl_cents)
+    # Migrate any legacy position (pre-multimarket, station="") to the first market's station.
+    if book.backfill_station(cfg.markets[0].station):
+        book.save(cfg.paths.positions_snapshot)
 
     if args.headless:
         return asyncio.run(_run_headless(cfg, art, book, args))
@@ -83,12 +86,19 @@ async def _run_headless(cfg, art, book, args) -> int:
         # Activation preflight (read-only): wallet, open positions, today's market, strategy.
         await preflight(cfg, book, kalshi)
         if not args.loop:
-            result = await run_cycle(cfg, art, book, kalshi,
-                                     force_anchor=force_anchor,
-                                     skip_refresh=args.no_refresh)
-            _print_summary(result)
+            results = await run_cycle(cfg, art, book, kalshi,
+                                      force_anchor=force_anchor,
+                                      skip_refresh=args.no_refresh)
+            for result in results:
+                _print_summary(result)
             return 0
 
+        if not cfg.model.enabled:
+            # Model-free multi-market: one resident process fires each city at ITS OWN local
+            # 1 PM (any US tz). No data-refresh / intraday (model-free fetches nothing).
+            return await _run_market_loop(cfg, art, book, kalshi)
+
+        # Model path (single-station): data-refresh + anchor + intraday on the single-tz Scheduler.
         scheduler = Scheduler(cfg, cfg.paths.scheduler_state)
         logger.info("headless loop starting; ctrl-C to stop")
         try:
@@ -98,9 +108,10 @@ async def _run_headless(cfg, art, book, args) -> int:
                     await refresh_data(cfg)
                     scheduler.record(action)
                 elif action in (Action.ANCHOR, Action.INTRADAY):
-                    result = await run_cycle(cfg, art, book, kalshi,
-                                             skip_refresh=(action == Action.INTRADAY))
-                    _print_summary(result)
+                    results = await run_cycle(cfg, art, book, kalshi,
+                                              skip_refresh=(action == Action.INTRADAY))
+                    for result in results:
+                        _print_summary(result)
                     scheduler.record(action)
                 await asyncio.sleep(60)
         except KeyboardInterrupt:
@@ -108,8 +119,37 @@ async def _run_headless(cfg, art, book, args) -> int:
             return 0
 
 
+async def _run_market_loop(cfg, art, book, kalshi) -> int:
+    """Resident model-free loop: fire each market at ITS OWN local 1 PM, any US tz, one process.
+
+    Sleeps until the soonest market anchor (capped at 5 min so day-rollover / DST / a newly
+    edited market list are picked up), then trades + settles every market that just came due.
+    """
+    from weather_alpha.scheduler import MarketAnchorScheduler
+
+    sched = MarketAnchorScheduler(cfg, cfg.paths.scheduler_state)
+    tzs = sorted({m.local_tz for m in cfg.markets})
+    logger.info("multi-market loop: %d market(s) across %s; ctrl-C to stop",
+                len(cfg.markets), ", ".join(tzs))
+    try:
+        while True:
+            due = sched.due_markets(cfg.markets)
+            if due:
+                logger.info("anchor due: %s", [m.name for m in due])
+                results = await run_cycle(cfg, art, book, kalshi, markets=due)
+                for result in results:
+                    _print_summary(result)
+                for m in due:
+                    sched.record(m)
+            sleep_s = max(1.0, min(sched.seconds_until_next(cfg.markets), 300.0))
+            await asyncio.sleep(sleep_s)
+    except KeyboardInterrupt:
+        logger.info("multi-market loop interrupted; exiting cleanly")
+        return 0
+
+
 def _print_summary(r) -> None:
-    print(f"\n=== cycle @ anchor={r.anchor_date.date()} ===")
+    print(f"\n=== cycle [{r.diagnostics.get('market', '?')}] @ anchor={r.anchor_date.date()} ===")
     print(f"  median {r.prediction.median}°F  80% CI [{r.prediction.lo10}, {r.prediction.hi90}]°F  "
           f"peak {r.prediction.peak_F}°F P={r.prediction.peak_P:.3f}  season={r.prediction.season}")
     print(f"  contracts: {r.contracts_count} ({r.live_contracts} live)")

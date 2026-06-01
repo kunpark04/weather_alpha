@@ -1,0 +1,17 @@
+# systemd --user RESIDENT service: the PAPER multi-market bot. Long-running --loop that fires
+# each city in config/paper.yaml at its own local 1 PM. mode: paper => NO real orders, NO creds.
+# Install to ~/.config/systemd/user/.  Edit paths if your clone is not at ~/weather-alpha.
+[Unit]
+Description=Weather Alpha - PAPER resident multi-market bot
+
+[Service]
+Type=simple
+WorkingDirectory=%h/weather-alpha
+ExecStart=%h/weather-alpha/.venv/bin/python -m weather_alpha --headless --loop --config config/paper.yaml
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

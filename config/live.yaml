@@ -1,0 +1,89 @@
+# LIVE resident bot — "one bot for ALL live cities" (multi-market, Option B).
+# Long-running `--headless --loop` process: fires each city under `markets:` at ITS OWN local
+# 1 PM (any US timezone), trades + settles + enforces drawdown halts. mode: live => REAL orders;
+# needs the read-WRITE Kalshi key. Isolated state under data/live/ + logs/live.
+# (top-level station/local_tz/execution.market_event_pattern are OMITTED on purpose — for a
+#  multi-market config they're back-filled from markets[0] for legacy back-compat.)
+mode: live
+
+markets:
+  # name = short tag (terminal lines + per-city state); station = NWS settlement station;
+  # local_tz = the city's 1 PM anchor tz — EXACT IANA name (incl. no-DST America/Phoenix).
+  - {name: CHI, event_pattern: KXHIGHCHI, station: KMDW, local_tz: America/Chicago}
+  # Append more LIVE cities here as you validate them, e.g.:
+  # - {name: NYC, event_pattern: KXHIGHNY,  station: KNYC, local_tz: America/New_York}
+  # - {name: LAX, event_pattern: KXHIGHLAX, station: KLAX, local_tz: America/Los_Angeles}
+  # - {name: PHX, event_pattern: KXHIGHPHIL, station: KPHX, local_tz: America/Phoenix}   # no DST
+
+paths:
+  data_dir: data
+  model_dir: data/model_v3_artifacts          # unused (model-free), kept for schema
+  live_log: data/live/live_log.parquet
+  positions_snapshot: data/live/positions.json
+  notebook_v3: notebooks/model_v3.ipynb
+  logs_dir: logs/live
+  kill_switch: data/live/KILL_SWITCH
+  scheduler_state: data/live/scheduler_state.json
+
+model:
+  name: v3
+  anchor_hour_local: 13
+  enabled: false                  # model-free (market_wing) — REQUIRED for multi-market
+
+strategy:
+  name: market_wing
+  bankroll_usd: 25.0              # hint only; LIVE adopts the real get_balance()
+  kelly_fraction: 0.25
+  wing:
+    drop_lower_ask: true
+    require_agreement: false
+    anchor: market
+    assumed_win_prob: 0.92
+    max_ask_sum: 0.90
+    sizing_mode: equal_payout
+    flat_usd: 2.5                 # flat $2.50/trade (sizing unchanged by the drawdown stops)
+    fee_aware: true
+  kl_concentration_alpha: 1.0
+  edge_floor_cents: 1
+  per_contract_max_pct: 0.20
+  total_exposure_max_pct: 0.60
+  regime_throttle:
+    hrrr_persistence_gap_max_f: 8
+    confidence_floor_top1: 0.20
+
+execution:
+  fill_model: ask
+  slippage_cents: 0
+  intraday_refresh_minutes: 60
+  # market_event_pattern omitted -> taken from markets[0]
+
+kalshi:
+  api_base: https://api.elections.kalshi.com/trade-api/v2
+  key_id_env: KALSHI_KEY_ID
+  private_key_path_env: KALSHI_PRIVATE_KEY_PATH
+  rest_poll_seconds: 30
+  request_timeout_seconds: 15
+
+data:
+  asos_source: auto
+  synoptic_token_env: SYNOPTIC_TOKEN
+  metar_obs_limit: 40
+  taf_hours_back: 36
+  asos_hours_back: 48
+  cli_days_back: 30
+  hrrr_publish_lag_min: 90
+
+scheduler:
+  anchor_grace_minutes: 0         # fire AT each city's 1 PM (no buffer)
+  data_refresh_minutes: 15
+  predict_lookback_hours: 2
+
+risk:
+  daily_max_loss_usd: 100.0
+  per_anchor_max_trades: 6
+  per_city_drawdown_pct: 0.25     # halt ONE city at 25% drawdown of the running account
+  account_drawdown_pct: 0.50      # halt ALL cities at 50% account drawdown (from peak)
+
+ui:
+  refresh_hz: 4
+  theme: dark

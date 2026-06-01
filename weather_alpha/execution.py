@@ -23,12 +23,13 @@ from typing import Iterable
 
 import pandas as pd
 
-from weather_alpha.config import Config
+from weather_alpha.config import Config, MarketCfg
 from weather_alpha.fees import trade_fee_cents
 from weather_alpha.kalshi import KalshiClient, KalshiContract
 from weather_alpha.live_log import LogRow, append_rows
 from weather_alpha.model import Prediction
 from weather_alpha.positions import Book
+from weather_alpha.report import report, usd_signed
 from weather_alpha.strategy import StrategyOutput, TargetPosition
 
 logger = logging.getLogger(__name__)
@@ -59,10 +60,18 @@ async def execute(
     strategy: StrategyOutput,
     book: Book,
     client: KalshiClient | None,
+    *,
+    market: MarketCfg | None = None,
 ) -> ExecutionResult:
-    """Run execution for one anchor cycle. Mutates `book` in place. Appends log rows."""
+    """Run execution for one anchor cycle. Mutates `book` in place. Appends log rows.
+
+    `market` (multi-market) supplies the settlement station tagged onto each fill and the
+    local tz for the log timestamp; when None, the legacy cfg.station/cfg.local_tz are used.
+    """
     _check_kill_switch(cfg)
     _check_daily_loss(cfg, book, prediction)
+    station = market.station if market is not None else cfg.station
+    tz = market.local_tz if market is not None else cfg.local_tz
 
     target_by_ticker = {t.ticker: t for t in strategy.targets}
     rows: list[LogRow] = []
@@ -71,7 +80,7 @@ async def execute(
     orders: list[dict] = []
 
     run_utc = pd.Timestamp.now(tz="UTC")
-    t_utc = _t_utc_for(prediction.date, cfg)
+    t_utc = _t_utc_for(prediction.date, cfg, tz)
     anchor_iso = str(prediction.date.date())
     halted = False
     halt_reason: str | None = None
@@ -164,6 +173,7 @@ async def execute(
             contracts=fill["contracts"], fill_cents=fill["fill_price_cents"],
             fee_cents=fill["fee_cents"], bucket_spec=tgt_delta.bucket_spec,
             opened_utc=run_utc.isoformat(), anchor_date=anchor_iso,
+            station=station,
         )
         fills += 1
         orders.append(fill)
@@ -328,8 +338,8 @@ def _check_daily_loss(cfg: Config, book: Book, prediction: Prediction) -> None:
 # LogRow factories
 # ---------------------------------------------------------------------------
 
-def _t_utc_for(anchor_date: pd.Timestamp, cfg: Config) -> pd.Timestamp:
-    return (pd.Timestamp(anchor_date).normalize().tz_localize(cfg.local_tz)
+def _t_utc_for(anchor_date: pd.Timestamp, cfg: Config, tz: str | None = None) -> pd.Timestamp:
+    return (pd.Timestamp(anchor_date).normalize().tz_localize(tz or cfg.local_tz)
             + pd.Timedelta(hours=cfg.model.anchor_hour_local)).tz_convert("UTC")
 
 
@@ -397,10 +407,12 @@ def _filled_row(cfg, run_utc, t_utc, pred, c, tgt, fill) -> LogRow:
 # Settlement
 # ---------------------------------------------------------------------------
 
-def reconcile_settlements(book: Book, cli_df: pd.DataFrame) -> int:
-    """Walk all open positions; if cli truth exists for their anchor_date, settle.
+def reconcile_settlements(book: Book, cli_df: pd.DataFrame, *, station: str | None = None) -> int:
+    """Walk open positions; if CLI truth exists for their anchor_date, settle.
 
-    Returns the cents of newly realized PnL this call.
+    `station` (multi-market): only settle positions whose station matches — so each city's
+    positions resolve against ITS OWN station's high. None settles every position (legacy
+    single-station / model path). Returns the cents of newly realized PnL this call.
     """
     truth_by_date = {pd.Timestamp(d).normalize().date(): int(v)
                      for d, v in cli_df[["date", "max_temp_f"]].dropna().itertuples(index=False, name=None)}
@@ -408,6 +420,8 @@ def reconcile_settlements(book: Book, cli_df: pd.DataFrame) -> int:
     for key in list(book.positions.keys()):
         p = book.positions[key]
         if p.settled:
+            continue
+        if station is not None and p.station != station:
             continue
         d = pd.Timestamp(p.anchor_date).date()
         if d not in truth_by_date:
@@ -417,5 +431,8 @@ def reconcile_settlements(book: Book, cli_df: pd.DataFrame) -> int:
         pred, _ = parse_bucket(p.bucket_spec)
         bucket_wins = pred(actual)
         won = (p.side == "yes" and bucket_wins) or (p.side == "no" and not bucket_wins)
-        realized += book.settle(p.ticker, p.side, won, settled_utc=pd.Timestamp.now(tz="UTC").isoformat())
+        pnl = book.settle(p.ticker, p.side, won, settled_utc=pd.Timestamp.now(tz="UTC").isoformat())
+        realized += pnl
+        report(f"[{p.station or '?'} {d:%d%b}] 💰 SETTLED {p.side.upper()} {p.bucket_spec} — "
+               f"high {actual}°F → {'WON' if won else 'lost'} {usd_signed(pnl)}")
     return realized

@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from weather_alpha.config import Config
+from weather_alpha.config import Config, MarketCfg
 from weather_alpha.data import DataBundle, latest_viable_anchor, load_bundle, refresh_live
 from weather_alpha.execution import ExecutionResult, KillSwitchTripped, execute, reconcile_settlements
 from weather_alpha.features import build_features
@@ -24,6 +24,7 @@ from weather_alpha.live_fetchers import fetch_live_cli
 from weather_alpha.model import ModelArtifacts, Prediction, predict_for_anchor
 from weather_alpha.pmf import INTEGER_F_GRID
 from weather_alpha.positions import Book
+from weather_alpha.report import report, usd
 from weather_alpha.strategy import StrategyOutput, run_strategy, run_wing_strategy
 
 logger = logging.getLogger(__name__)
@@ -74,66 +75,129 @@ async def run_cycle(
     *,
     force_anchor: pd.Timestamp | None = None,
     skip_refresh: bool = False,
-) -> CycleResult:
-    """Run one anchor cycle: predict → strategize → execute → settle reconcile."""
+    markets: list[MarketCfg] | None = None,
+) -> list[CycleResult]:
+    """Run one anchor cycle for the given markets (default cfg.markets), sharing Book + bankroll.
+
+    Returns one CycleResult per market (decision + execution + that market's per-station
+    settlement). Live/paper is a process-level property, so all markets here share the same
+    mode and the same real account. The model-enabled path is single-station (v3 artifacts
+    are KMDW-specific), so it requires exactly one market; multi-market is the model-free path.
+    """
+    bundle: DataBundle | None = None
     if cfg.model.enabled:
         if art is None:
             raise RuntimeError("model.enabled=true but no model artifacts were loaded — check model_dir")
+        if len(cfg.markets) != 1:
+            raise RuntimeError(
+                "model.enabled=true supports a single market (v3 artifacts are station-specific); "
+                "use a model-free strategy (market_wing) for multi-market."
+            )
         if not skip_refresh:
             await refresh_data(cfg, anchor_dt_local=force_anchor)
         bundle = load_bundle(cfg.paths.data_dir, cfg.station)
+
+    target_markets = markets if markets is not None else cfg.markets
+    results: list[CycleResult] = []
+    total_realized = 0
+    for market in target_markets:
+        r = await _run_one_market(cfg, market, art, book, kalshi,
+                                  bundle=bundle, force_anchor=force_anchor)
+        results.append(r)
+        total_realized += r.realized_at_settle
+
+    # One post-settlement bankroll re-sync for the whole process (LIVE only; PAPER no-op).
+    if total_realized:
+        await _resync_bankroll_after_settlement(cfg, book, kalshi)
+    # Drawdown circuit-breakers: refresh peaks + latch halts vs the RUNNING account balance.
+    balance_cents = (book.bankroll_cents if (cfg.is_live() and book.bankroll_cents is not None)
+                     else int(round(_current_bankroll(cfg, book) * 100)))
+    for label in book.update_drawdown_halts(balance_cents, cfg.risk.per_city_drawdown_pct,
+                                            cfg.risk.account_drawdown_pct):
+        logger.critical("DRAWDOWN HALT latched: %s", label)
+        report(f"⛔ HALT LATCHED — {label}; stays halted until you reset it "
+               f"(python scripts/halt.py --reset)")
+    book.save(cfg.paths.positions_snapshot)
+    return results
+
+
+async def _run_one_market(
+    cfg: Config,
+    market: MarketCfg,
+    art: ModelArtifacts | None,
+    book: Book,
+    kalshi: KalshiClient,
+    *,
+    bundle: DataBundle | None,
+    force_anchor: pd.Timestamp | None = None,
+) -> CycleResult:
+    """One city's slice of a cycle: predict → strategize → execute → settle (its station)."""
+    if cfg.model.enabled:
+        assert bundle is not None and art is not None
         anchor = force_anchor.normalize() if force_anchor is not None else \
-                 latest_viable_anchor(bundle, art.t_hour_local, cfg.local_tz)
+                 latest_viable_anchor(bundle, art.t_hour_local, market.local_tz)
         fb = build_features(bundle, art, anchor, cfg.paths.notebook_v3)
         pred = predict_for_anchor(art, anchor, fb.feature_df)
         feature_row = fb.feature_df.loc[fb.feature_df["date"] == anchor].iloc[0] \
                       if (fb.feature_df["date"] == anchor).any() else None
-        logger.info("cycle: anchor=%s mode=%s  median=%d°F  80%% CI=[%d,%d]°F  peak=%d°F (P=%.3f)",
-                    anchor.date(), cfg.mode, pred.median, pred.lo10, pred.hi90, pred.peak_F, pred.peak_P)
+        logger.info("cycle [%s]: anchor=%s mode=%s  median=%d°F  80%% CI=[%d,%d]°F  peak=%d°F (P=%.3f)",
+                    market.name, anchor.date(), cfg.mode, pred.median, pred.lo10, pred.hi90,
+                    pred.peak_F, pred.peak_P)
     else:
-        # Model-free path: a market-anchored strategy (market_wing) uses neither the model
-        # nor weather inputs, so we load NO data bundle and fetch no weather. The anchor is
-        # simply today's event date; settlement pulls the CLI high on demand (settle_if_due)
-        # only when a prior-day position is still open.
-        local_today = pd.Timestamp.now(tz=cfg.local_tz).normalize().tz_localize(None)
+        # Model-free path: market_wing uses neither the model nor weather, so we load NO
+        # bundle and fetch no weather. Anchor = today's event date in the MARKET's tz;
+        # settlement pulls the CLI high on demand (settle_market_if_due) only when a
+        # prior-day position for this station is still open.
+        local_today = pd.Timestamp.now(tz=market.local_tz).normalize().tz_localize(None)
         anchor = force_anchor.normalize() if force_anchor is not None else local_today
         pred = _placeholder_prediction(cfg, anchor)
         feature_row = None
-        logger.info("cycle (model-free): anchor=%s mode=%s", anchor.date(), cfg.mode)
+        logger.info("cycle [%s] (model-free): anchor=%s mode=%s", market.name, anchor.date(), cfg.mode)
 
-    contracts = await kalshi.fetch_event(anchor, cfg.execution.market_event_pattern)
+    contracts = await kalshi.fetch_event(anchor, market.event_pattern)
     live, skip_reason = _tradeable_contracts(contracts, anchor)
 
     bankroll = _current_bankroll(cfg, book)
-    if skip_reason is not None:
-        # W3: refuse to open into a closed / not-yet-open / mismatched event, and say so
-        # explicitly rather than emitting nothing silently. Settlement still reconciles below.
-        logger.warning("event guard: %s (anchor=%s) — no new positions this cycle",
-                       skip_reason, anchor.date())
+    tag = f"[{pd.Timestamp.now(tz=market.local_tz):%H:%M} {market.name}]"
+    if book.is_halted(market.station):
+        pct = cfg.risk.account_drawdown_pct if book.account_halted else cfg.risk.per_city_drawdown_pct
+        scope = "account" if book.account_halted else "city"
+        reason = f"{scope} drawdown halt (>= {pct:.0%} of running account)"
+        logger.warning("[%s] HALTED — %s; no new trades until reset", market.name, reason)
+        report(f"{tag} ⛔ HALTED — {reason}; reset: python scripts/halt.py --reset {market.station}")
+        strat = StrategyOutput(targets=[], diagnostics={"halted": reason})
+    elif skip_reason is not None:
+        # W3: refuse to open into a closed / not-yet-open / mismatched event, said explicitly
+        # rather than emitting nothing silently. Settlement still reconciles below.
+        logger.warning("[%s] event guard: %s (anchor=%s) — no new positions this cycle",
+                       market.name, skip_reason, anchor.date())
+        report(f"{tag} ⏭️  SKIP — {skip_reason}")
         strat = StrategyOutput(targets=[], diagnostics={"event_guard": skip_reason})
     else:
         strat = _dispatch_strategy(cfg, pred, contracts, feature_row, bankroll)
+        _report_decision(tag, strat)
 
     try:
-        exec_result = await execute(cfg, pred, contracts, strat, book, kalshi if cfg.is_live() else None)
+        exec_result = await execute(cfg, pred, contracts, strat, book,
+                                    kalshi if cfg.is_live() else None, market=market)
     except KillSwitchTripped as e:
-        # #5: the kill switch / daily-loss cap blocks NEW ORDERS only — it must NOT block
-        # settlement of prior-day positions or the post-settlement bankroll re-sync (neither
-        # places an order). execute() raises before placing anything, so record a no-trade
-        # result and fall through to the settlement reconcile below.
-        logger.warning("execution gated (%s) — placing no new orders; settlement still runs", e)
+        # #5: the kill switch / daily-loss cap blocks NEW ORDERS only — settlement of
+        # prior-day positions (below) and the bankroll re-sync must still run.
+        logger.warning("[%s] execution gated (%s) — no new orders; settlement still runs",
+                       market.name, e)
+        report(f"{tag} ⛔ GATED — {e}; no new orders (settlement still runs)")
         exec_result = ExecutionResult(fills=0, skipped=0, realized_orders=[],
                                       diagnostics={"gated": str(e)})
+    _report_fills(tag, exec_result)
 
-    # Settlement: model-enabled reconciles against the freshly-refreshed bundle CLI;
-    # model-free pulls the CLI high on demand only when a prior-day position is pending.
+    # Settlement for THIS market's station only.
     if cfg.model.enabled:
-        realized = reconcile_settlements(book, bundle.cli)
+        assert bundle is not None
+        realized = reconcile_settlements(book, bundle.cli, station=market.station)
     else:
-        realized = await settle_if_due(cfg, book)
+        realized = await settle_market_if_due(cfg, market, book)
     if realized:
-        logger.info("settled positions realized %+d¢ this cycle", realized)
-        await _resync_bankroll_after_settlement(cfg, book, kalshi)
+        logger.info("[%s] settled positions realized %+d¢ this cycle", market.name, realized)
         book.save(cfg.paths.positions_snapshot)
 
     return CycleResult(
@@ -145,6 +209,8 @@ async def run_cycle(
         execution=exec_result,
         realized_at_settle=realized,
         diagnostics={
+            "market": market.name,
+            "station": market.station,
             "bankroll_usd": bankroll,
             "open_exposure_cents": book.exposure_cents(),
             "realized_pnl_cents": book.realized_pnl_cents,
@@ -184,6 +250,33 @@ def _dispatch_strategy(cfg: Config, pred, contracts, feature_row, bankroll: floa
             fee_aware=w.fee_aware,
         )
     return run_strategy(cfg.strategy, pred, contracts, feature_row, bankroll)
+
+
+def _report_decision(tag: str, strat: StrategyOutput) -> None:
+    """One concise terminal line for the 1 PM decision: ENTER (the legs) or SKIP (reason)."""
+    if not strat.targets:
+        d = strat.diagnostics
+        reason = d.get("skip_reason") or d.get("reason")
+        if not reason:
+            bits = [f"{k}={d[k]}" for k in ("sum_asks", "ev_margin", "agreement") if k in d]
+            reason = "no qualifying wing" + (f" ({', '.join(bits)})" if bits else "")
+        report(f"{tag} ⏭️  SKIP — {reason}")
+        return
+    legs = ", ".join(f"{t.side.upper()} {t.bucket_spec} @ {t.limit_price_cents}¢" for t in strat.targets)
+    stake_c = sum(t.target_contracts * t.limit_price_cents for t in strat.targets)
+    sa = strat.diagnostics.get("sum_asks")
+    sa_txt = f"sum {sa:.2f}, " if isinstance(sa, (int, float)) else ""
+    report(f"{tag} ✅ ENTER — {legs}  ({sa_txt}stake {usd(stake_c)})")
+
+
+def _report_fills(tag: str, exec_result: ExecutionResult) -> None:
+    """One concise terminal line summarizing what actually filled this cycle."""
+    if exec_result.fills <= 0:
+        return
+    orders = exec_result.realized_orders
+    outlay = sum(o.get("contracts", 0) * o.get("fill_price_cents", 0) for o in orders)
+    fees = sum(o.get("fee_cents", 0) for o in orders)
+    report(f"{tag} 💸 FILLED {exec_result.fills} leg(s) — outlay {usd(outlay)}, fee {usd(fees)}")
 
 
 def _tradeable_contracts(contracts: list, anchor: pd.Timestamp) -> tuple[list, str | None]:
@@ -267,19 +360,21 @@ async def _resync_bankroll_after_settlement(cfg: Config, book: Book, client: Kal
         logger.exception("post-settlement balance refresh failed; keeping prior bankroll")
 
 
-async def settle_if_due(cfg: Config, book: Book) -> int:
-    """Model-free settlement. Fetch the CLI daily-high table on demand ONLY when a
-    prior-day position is still open (anchor_date < today, local) — then reconcile.
-    Returns newly realized cents. No weather pull on days with nothing to settle; if the
-    CLI truth hasn't landed yet it settles nothing and retries next cycle. This is the
-    *only* data a model-free run fetches beyond the Kalshi market itself."""
-    today = pd.Timestamp.now(tz=cfg.local_tz).normalize().date()
-    has_pending = any(not p.settled and pd.Timestamp(p.anchor_date).date() < today
+async def settle_market_if_due(cfg: Config, market: MarketCfg, book: Book) -> int:
+    """Model-free per-market settlement. Fetch the CLI daily-high for THIS market's station
+    on demand ONLY when one of its prior-day positions is still open (anchor_date < today in
+    the market's tz) — then reconcile just that station's positions. Returns newly realized
+    cents. No weather pull on days with nothing to settle; if the CLI truth hasn't landed yet
+    it settles nothing and retries next cycle. This is the *only* data a model-free run
+    fetches beyond the Kalshi market itself."""
+    today = pd.Timestamp.now(tz=market.local_tz).normalize().date()
+    has_pending = any(not p.settled and p.station == market.station
+                      and pd.Timestamp(p.anchor_date).date() < today
                       for p in book.positions.values())
     if not has_pending:
         return 0
-    cli_df = await asyncio.to_thread(fetch_live_cli, cfg.station, days_back=cfg.data.cli_days_back)
-    return reconcile_settlements(book, cli_df)
+    cli_df = await asyncio.to_thread(fetch_live_cli, market.station, days_back=cfg.data.cli_days_back)
+    return reconcile_settlements(book, cli_df, station=market.station)
 
 
 async def preflight(cfg: Config, book: Book, client: KalshiClient) -> None:
@@ -301,12 +396,15 @@ async def preflight(cfg: Config, book: Book, client: KalshiClient) -> None:
                 logger.info("  %s %s x%d @ %d¢%s", p.ticker, p.side, p.contracts, p.avg_price_cents, flag)
         except Exception:
             logger.exception("preflight: get_positions failed (continuing)")
-    try:
-        today = pd.Timestamp.now(tz=cfg.local_tz).normalize().tz_localize(None)
-        contracts = await client.fetch_event(today, cfg.execution.market_event_pattern)
-        live = [c for c in contracts if c.is_live]
-        logger.info("preflight: %s event — %d contracts (%d live)", today.date(), len(contracts), len(live))
-        if not live:
-            logger.warning("preflight: no live contracts for today's event — engine will no-trade until it opens")
-    except Exception:
-        logger.exception("preflight: market fetch failed (continuing)")
+    for market in cfg.markets:
+        try:
+            today = pd.Timestamp.now(tz=market.local_tz).normalize().tz_localize(None)
+            contracts = await client.fetch_event(today, market.event_pattern)
+            live = [c for c in contracts if c.is_live]
+            logger.info("preflight [%s]: %s event — %d contracts (%d live)",
+                        market.name, today.date(), len(contracts), len(live))
+            if not live:
+                logger.warning("preflight [%s]: no live contracts for today's event — "
+                               "will no-trade until it opens", market.name)
+        except Exception:
+            logger.exception("preflight [%s]: market fetch failed (continuing)", market.name)

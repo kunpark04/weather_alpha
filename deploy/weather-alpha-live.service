@@ -1,0 +1,20 @@
+# systemd --user RESIDENT service: the LIVE multi-market bot ("one bot for all live cities").
+# Long-running --loop process that fires each city in config/live.yaml at ITS OWN local 1 PM
+# (any US timezone), trades + settles + enforces drawdown halts. mode: live => places REAL orders.
+# Install to ~/.config/systemd/user/.  Edit WorkingDirectory / venv / EnvironmentFile if your
+# clone is not at ~/weather-alpha. Reads the read-WRITE Kalshi creds from the EnvironmentFile.
+[Unit]
+Description=Weather Alpha - LIVE resident multi-market bot (one bot, all live cities)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/weather-alpha
+EnvironmentFile=%h/weather-alpha/secrets/kalshi-rw.env
+ExecStart=%h/weather-alpha/.venv/bin/python -m weather_alpha --headless --loop --config config/live.yaml
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

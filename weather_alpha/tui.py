@@ -164,9 +164,10 @@ class WeatherAlphaApp(App):
                 await refresh_data(self._cfg)
             elif action in (Action.ANCHOR, Action.INTRADAY):
                 logger.info("scheduler -> %s", action.value.upper())
-                result = await run_cycle(self._cfg, self._art, self._book, self._kalshi,
-                                         skip_refresh=(action == Action.INTRADAY))
-                self._render_cycle(result)
+                results = await run_cycle(self._cfg, self._art, self._book, self._kalshi,
+                                          skip_refresh=(action == Action.INTRADAY))
+                for result in results:
+                    self._render_cycle(result)
             self._scheduler.record(action)
         except Exception:
             logger.exception("scheduler action %s failed", action.value)

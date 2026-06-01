@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from weather_alpha.config import Config
+from weather_alpha.config import Config, MarketCfg
 
 logger = logging.getLogger(__name__)
 
@@ -155,3 +155,82 @@ class Scheduler:
         return (today + pd.Timedelta(days=1)
                 + pd.Timedelta(hours=self._cfg.model.anchor_hour_local,
                                 minutes=self._cfg.scheduler.anchor_grace_minutes)) - now
+
+
+class MarketAnchorScheduler:
+    """Per-market anchor scheduler for the resident, model-free, multi-timezone bot.
+
+    Fires each market at ITS OWN local 1 PM (+ grace), once per local day, regardless of
+    timezone — so a single resident process serves cities in ANY US tz (Eastern, Central,
+    Mountain, Pacific, the no-DST zones, …). Persists the per-market last-run date so a
+    restart never re-fires a city already done today. (The model path keeps the single-tz
+    `Scheduler` above, which also does data-refresh + intraday.)
+    """
+
+    def __init__(self, cfg: Config, state_path: Path | str | None = None):
+        self._cfg = cfg
+        self._state_path = Path(state_path) if state_path else None
+        self.last_anchor: dict[str, str] = {}      # market name -> ISO local date last fired
+        if self._state_path is not None:
+            self._load()
+
+    def _anchor_for(self, m: MarketCfg, now_utc: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp, str]:
+        """(now in the market's tz, today's anchor instant in that tz, today's ISO date)."""
+        now_local = now_utc.tz_convert(m.local_tz)
+        today = now_local.normalize()
+        anchor_at = today + pd.Timedelta(hours=self._cfg.model.anchor_hour_local,
+                                         minutes=self._cfg.scheduler.anchor_grace_minutes)
+        return now_local, anchor_at, str(today.date())
+
+    def due_markets(self, markets: list[MarketCfg], now_utc: pd.Timestamp | None = None) -> list[MarketCfg]:
+        """Markets whose local anchor has passed today and that haven't fired today yet."""
+        now_utc = now_utc if now_utc is not None else pd.Timestamp.now(tz="UTC")
+        due = []
+        for m in markets:
+            now_local, anchor_at, today = self._anchor_for(m, now_utc)
+            if now_local >= anchor_at and self.last_anchor.get(m.name) != today:
+                due.append(m)
+        return due
+
+    def seconds_until_next(self, markets: list[MarketCfg], now_utc: pd.Timestamp | None = None) -> float:
+        """Seconds until the soonest market anchor still needing to fire (for sleeping)."""
+        now_utc = now_utc if now_utc is not None else pd.Timestamp.now(tz="UTC")
+        best: float | None = None
+        for m in markets:
+            now_local, anchor_at, today = self._anchor_for(m, now_utc)
+            if now_local < anchor_at and self.last_anchor.get(m.name) != today:
+                nxt = anchor_at                                    # today's, not yet fired
+            else:
+                tomorrow = now_local.normalize() + pd.Timedelta(days=1)
+                nxt = tomorrow + pd.Timedelta(hours=self._cfg.model.anchor_hour_local,
+                                              minutes=self._cfg.scheduler.anchor_grace_minutes)
+            secs = (nxt - now_local).total_seconds()
+            best = secs if best is None else min(best, secs)
+        return max(0.0, best if best is not None else 60.0)
+
+    def record(self, market: MarketCfg, now_utc: pd.Timestamp | None = None) -> None:
+        now_utc = now_utc if now_utc is not None else pd.Timestamp.now(tz="UTC")
+        today = now_utc.tz_convert(market.local_tz).normalize()
+        self.last_anchor[market.name] = str(today.date())
+        if self._state_path is not None:
+            self._save()
+
+    def _save(self) -> None:
+        try:
+            path = self._state_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps({"last_anchor": self.last_anchor}, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            logger.warning("could not persist market scheduler state to %s", self._state_path)
+
+    def _load(self) -> None:
+        path = self._state_path
+        if not path.exists():
+            return
+        try:
+            d = json.loads(path.read_text(encoding="utf-8"))
+            self.last_anchor = {str(k): str(v) for k, v in dict(d.get("last_anchor", {})).items()}
+        except (OSError, json.JSONDecodeError):
+            logger.warning("could not read market scheduler state at %s; starting fresh", path)

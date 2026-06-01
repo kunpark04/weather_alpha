@@ -1,0 +1,82 @@
+# PAPER resident bot — multi-market forward paper-trade (Option B). Long-running
+# `--headless --loop`: fires each city under `markets:` at its own local 1 PM. mode: paper =>
+# NO real orders, NO creds. Isolated state under data/paper/ + logs/paper. Run this for a week
+# (a 2-city paper bot) to validate the loop/settlement/risk/reporter before migrating a city LIVE.
+mode: paper
+
+markets:
+  - {name: HOU, event_pattern: KXHIGHTHOU, station: KHOU, local_tz: America/Chicago}
+  # Append more PAPER cities to exercise multiple timezones, e.g.:
+  # - {name: NYC, event_pattern: KXHIGHNY,  station: KNYC, local_tz: America/New_York}
+
+paths:
+  data_dir: data
+  model_dir: data/model_v3_artifacts
+  live_log: data/paper/live_log.parquet
+  positions_snapshot: data/paper/positions.json
+  notebook_v3: notebooks/model_v3.ipynb
+  logs_dir: logs/paper
+  kill_switch: data/paper/KILL_SWITCH
+  scheduler_state: data/paper/scheduler_state.json
+
+model:
+  name: v3
+  anchor_hour_local: 13
+  enabled: false
+
+strategy:
+  name: market_wing
+  bankroll_usd: 25.0
+  kelly_fraction: 0.25
+  wing:
+    drop_lower_ask: true
+    require_agreement: false
+    anchor: market
+    assumed_win_prob: 0.92
+    max_ask_sum: 0.90
+    sizing_mode: equal_payout
+    flat_usd: 2.5
+    fee_aware: true
+  kl_concentration_alpha: 1.0
+  edge_floor_cents: 1
+  per_contract_max_pct: 0.20
+  total_exposure_max_pct: 0.60
+  regime_throttle:
+    hrrr_persistence_gap_max_f: 8
+    confidence_floor_top1: 0.20
+
+execution:
+  fill_model: ask
+  slippage_cents: 0
+  intraday_refresh_minutes: 60
+
+kalshi:
+  api_base: https://api.elections.kalshi.com/trade-api/v2
+  key_id_env: KALSHI_KEY_ID
+  private_key_path_env: KALSHI_PRIVATE_KEY_PATH
+  rest_poll_seconds: 30
+  request_timeout_seconds: 15
+
+data:
+  asos_source: auto
+  synoptic_token_env: SYNOPTIC_TOKEN
+  metar_obs_limit: 40
+  taf_hours_back: 36
+  asos_hours_back: 48
+  cli_days_back: 30
+  hrrr_publish_lag_min: 90
+
+scheduler:
+  anchor_grace_minutes: 0
+  data_refresh_minutes: 15
+  predict_lookback_hours: 2
+
+risk:
+  daily_max_loss_usd: 100.0
+  per_anchor_max_trades: 6
+  per_city_drawdown_pct: 0.25
+  account_drawdown_pct: 0.50
+
+ui:
+  refresh_hz: 4
+  theme: dark

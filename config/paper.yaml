@@ -6,7 +6,8 @@ mode: paper
 
 markets:
   - {name: HOU, event_pattern: KXHIGHTHOU, station: KHOU, local_tz: America/Chicago}
-  # Append more PAPER cities to exercise multiple timezones, e.g.:
+  - {name: CHI, event_pattern: KXHIGHCHI,  station: KMDW, local_tz: America/Chicago}   # paper SHADOW of the live Chicago
+  # Append more PAPER cities (any US tz) to widen the test, e.g.:
   # - {name: NYC, event_pattern: KXHIGHNY,  station: KNYC, local_tz: America/New_York}
 
 paths:

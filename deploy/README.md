@@ -205,5 +205,7 @@ journalctl --user -u weather-alpha-live.service -f            # watch the ENTER/
 - **NTP required** (`sudo timedatectl set-ntp true`) so each city's 1 PM is real-time accurate.
 - **A vs B are interchangeable on the same engine** — A (per-city one-shot timers) is simplest for
   a single timezone; B (this resident bot) is the single "one bot for all live cities" the
-  multi-market refactor was built for. **Don't run BOTH for the same city** (they'd double-trade) —
-  pick one shape per city.
+  multi-market refactor was built for. **Don't run two LIVE shapes for the same city** (e.g. the
+  live one-shot timer AND the live resident, both for Chicago) — they'd both place real orders and
+  double-trade. A **LIVE process plus a PAPER process for the same city is fine** — paper places no
+  real orders, so it's a harmless (and useful) shadow-test of the live decision.

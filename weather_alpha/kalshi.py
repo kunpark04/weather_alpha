@@ -145,13 +145,19 @@ class KalshiClient:
         markets = r.json().get("markets", [])
         contracts: list[KalshiContract] = []
         for m in markets:
-            spec = _spec_from_market(m)
+            try:
+                spec = _spec_from_market(m)
+            except ValueError as e:
+                # One unparseable contract must not sink the whole event (nor, in a
+                # multi-market process, the other cities). Drop it and keep going.
+                logger.warning("skipping unparseable market: %s", e)
+                continue
             status = (m.get("status") or "").lower()
             contracts.append(KalshiContract(
                 ticker=m["ticker"],
                 event_ticker=ticker,
                 bucket_spec=spec,
-                subtitle=m.get("subtitle") or "",
+                subtitle=m.get("subtitle") or m.get("yes_sub_title") or "",
                 strike_type=m.get("strike_type"),
                 strike=m.get("floor_strike"),
                 yes_bid=float(m.get("yes_bid_dollars", 0)),
@@ -300,17 +306,29 @@ def _parse_positions(data: dict[str, Any]) -> list[KalshiPosition]:
 
 
 def _spec_from_market(m: dict[str, Any]) -> str:
-    """Convert a Kalshi market dict to a bucket_spec (subtitle-first, strike fallback)."""
-    spec = parse_kalshi_subtitle(m.get("subtitle"))
+    """Convert a Kalshi market dict to a bucket_spec.
+
+    Range-text first — `subtitle` OR `yes_sub_title`: some series (e.g. KXHIGHTHOU) leave
+    `subtitle` null and carry the human range only in `yes_sub_title`, so we read whichever
+    is present. Then a numeric-strike fallback: `between` uses floor/cap, and the `less`/
+    `greater` tails use `cap_strike`/`floor_strike` respectively (Kalshi's strike boundaries
+    sit on the half-degree, so a `less` cap of 89 means "≤ 88").
+    """
+    spec = parse_kalshi_subtitle(m.get("subtitle") or m.get("yes_sub_title"))
     if spec is not None:
         return spec
     st = m.get("strike_type")
-    strike = m.get("floor_strike")
-    if st == "less" and strike is not None:
-        return f"<{int(strike)}"
-    if st == "greater" and strike is not None:
-        return f">{int(strike)}"
-    raise ValueError(f"Cannot parse Kalshi market: {m.get('ticker')!r} subtitle={m.get('subtitle')!r}")
+    floor = m.get("floor_strike")
+    cap = m.get("cap_strike")
+    if st == "between" and floor is not None and cap is not None:
+        return f"{int(floor)}-{int(cap)}"
+    if st == "less" and cap is not None:
+        return f"<={int(cap) - 1}"
+    if st == "greater" and floor is not None:
+        return f">={int(floor) + 1}"
+    raise ValueError(f"Cannot parse Kalshi market: {m.get('ticker')!r} "
+                     f"subtitle={m.get('subtitle')!r} yes_sub_title={m.get('yes_sub_title')!r} "
+                     f"strike_type={st!r} floor={floor} cap={cap}")
 
 
 def _contract_sort_key(c: KalshiContract) -> int:

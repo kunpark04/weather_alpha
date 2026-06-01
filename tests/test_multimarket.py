@@ -22,6 +22,7 @@ sys.path.insert(0, str(_ROOT))
 from weather_alpha import engine                                            # noqa: E402
 from weather_alpha.config import load_config                               # noqa: E402
 from weather_alpha.execution import ExecutionResult, reconcile_settlements  # noqa: E402
+from weather_alpha.kalshi import _spec_from_market                          # noqa: E402
 from weather_alpha.positions import Book, Position                          # noqa: E402
 from weather_alpha.scheduler import MarketAnchorScheduler                   # noqa: E402
 from weather_alpha.strategy import StrategyOutput                           # noqa: E402
@@ -196,6 +197,28 @@ def test_run_cycle_honors_halt():
 
 
 # --- reporter smoke --------------------------------------------------------
+
+def test_spec_from_market_houston_and_chicago_formats():
+    # Houston: subtitle null; range only in yes_sub_title; between/less/greater via strikes.
+    assert _spec_from_market({"ticker": "B89.5", "subtitle": None, "yes_sub_title": "89° to 90°",
+                              "strike_type": "between", "floor_strike": 89, "cap_strike": 90}) == "89-90"
+    assert _spec_from_market({"ticker": "T89", "subtitle": None, "yes_sub_title": "88° or below",
+                              "strike_type": "less", "floor_strike": None, "cap_strike": 89}) == "<=88"
+    assert _spec_from_market({"ticker": "T96", "subtitle": None, "yes_sub_title": "97° or above",
+                              "strike_type": "greater", "floor_strike": 96, "cap_strike": None}) == ">=97"
+    # Chicago: subtitle present (unchanged path).
+    assert _spec_from_market({"ticker": "B72.5", "subtitle": "72° to 73°", "yes_sub_title": "72° to 73°",
+                              "strike_type": "between", "floor_strike": 72, "cap_strike": 73}) == "72-73"
+    # No range text at all -> numeric-strike fallback still resolves.
+    assert _spec_from_market({"ticker": "B", "subtitle": None, "yes_sub_title": None,
+                              "strike_type": "between", "floor_strike": 74, "cap_strike": 75}) == "74-75"
+    # Genuinely unparseable -> ValueError (so fetch_event skips it instead of crashing the cycle).
+    try:
+        _spec_from_market({"ticker": "?", "subtitle": None, "yes_sub_title": None, "strike_type": None})
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
 
 def test_reporter_smoke():
     engine._report_decision("[13:00 CHI]", StrategyOutput(targets=[], diagnostics={"sum_asks": 0.93}))

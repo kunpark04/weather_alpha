@@ -101,8 +101,15 @@ async def run_cycle(
     results: list[CycleResult] = []
     total_realized = 0
     for market in target_markets:
-        r = await _run_one_market(cfg, market, art, book, kalshi,
-                                  bundle=bundle, force_anchor=force_anchor)
+        try:
+            r = await _run_one_market(cfg, market, art, book, kalshi,
+                                      bundle=bundle, force_anchor=force_anchor)
+        except Exception:
+            # Isolate a per-market failure (bad data / parse / network) so one city can
+            # never take down the others — critical when a live city shares the process.
+            logger.exception("[%s] cycle failed — isolated; other markets continue", market.name)
+            report(f"[{market.name}] ❌ ERROR — cycle failed (see logs); other cities unaffected")
+            continue
         results.append(r)
         total_realized += r.realized_at_settle
 

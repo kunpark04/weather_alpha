@@ -9,7 +9,7 @@ the case where TWO event-days are open at once (verified live: 26MAY29 + 26MAY30
 
 Each market is filed under its OWN event date (parsed from the event_ticker), so
 overlapping days never mix:
-  <out>/<EVENT-DATE>/<ticker>.jsonl     e.g. data/orderbook/2026-05-29/KXHIGHCHI-26MAY29-T80.jsonl
+  <out>/<SERIES>/<EVENT-DATE>/<ticker>.jsonl     e.g. data/orderbook/KXHIGHCHI/2026-05-29/KXHIGHCHI-26MAY29-T80.jsonl
 
 When an event SETTLES (its markets drop out of the open set) and its date is in the
 past, that day's folder is zipped to <out>/<EVENT-DATE>.zip and the raw folder removed.
@@ -128,12 +128,16 @@ def poll() -> tuple[dict[str, list[dict]], set[str]]:
     return by_date, open_dates
 
 
-def append_records(day_dir: Path, records: list[dict]) -> None:
-    day_dir.mkdir(parents=True, exist_ok=True)
+def append_records(out: Path, ds: str, records: list[dict]) -> None:
+    """Append each market's snapshot to <out>/<series>/<ds>/<ticker>.jsonl — one file per market,
+    grouped by SERIES (city) first so each city's data + zips stay fully separate."""
     by_ticker: dict[str, list[dict]] = {}
     for r in records:
         by_ticker.setdefault(r["ticker"], []).append(r)
     for tkr, recs in by_ticker.items():
+        series = tkr.split("-", 1)[0]                       # KXHIGHCHI-26JUN01-B72.5 -> KXHIGHCHI
+        day_dir = out / series / ds
+        day_dir.mkdir(parents=True, exist_ok=True)
         with open(day_dir / f"{tkr}.jsonl", "a", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r, separators=(",", ":")) + "\n")
@@ -142,26 +146,29 @@ def append_records(day_dir: Path, records: list[dict]) -> None:
 
 
 def zip_settled_days(out: Path, open_dates: set[str], today: date) -> None:
-    """Zip+remove any day folder that is NOT currently open AND whose date is past."""
-    for folder in sorted(p for p in out.iterdir() if p.is_dir()):
-        try:
-            fdate = datetime.strptime(folder.name, "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        if folder.name in open_dates or fdate >= today:
-            continue  # still trading, or today/future — leave it
-        zpath = out / f"{folder.name}.zip"
-        try:
-            with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
-                for fp in sorted(folder.rglob("*")):
-                    if fp.is_file():
-                        z.write(fp, arcname=str(fp.relative_to(folder)))
-            for fp in sorted(folder.rglob("*"), reverse=True):
-                fp.unlink() if fp.is_file() else fp.rmdir()
-            folder.rmdir()
-            log.info("settled+zipped %s -> %s", folder.name, zpath.name)
-        except Exception:
-            log.exception("zip failed for %s (left raw folder)", folder.name)
+    """Zip+remove any <series>/<day> folder that is NOT currently open AND whose date is past —
+    one zip PER CITY PER DAY at <out>/<series>/<date>.zip (so each city stays separate)."""
+    for series_dir in sorted(p for p in out.iterdir() if p.is_dir()):
+        for folder in sorted(p for p in series_dir.iterdir() if p.is_dir()):
+            try:
+                fdate = datetime.strptime(folder.name, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if folder.name in open_dates or fdate >= today:
+                continue  # still trading, or today/future — leave it
+            zpath = series_dir / f"{folder.name}.zip"
+            try:
+                with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+                    for fp in sorted(folder.rglob("*")):
+                        if fp.is_file():
+                            z.write(fp, arcname=str(fp.relative_to(folder)))
+                for fp in sorted(folder.rglob("*"), reverse=True):
+                    fp.unlink() if fp.is_file() else fp.rmdir()
+                folder.rmdir()
+                log.info("settled+zipped %s/%s -> %s/%s", series_dir.name, folder.name,
+                         series_dir.name, zpath.name)
+            except Exception:
+                log.exception("zip failed for %s/%s (left raw folder)", series_dir.name, folder.name)
 
 
 def _handle_stop(signum, frame):
@@ -196,7 +203,7 @@ def main(argv=None) -> int:
         try:
             by_date, open_dates = poll()
             for ds, recs in by_date.items():
-                append_records(out / ds, recs)
+                append_records(out, ds, recs)
             if by_date:
                 log.info("logged %d markets across %d event(s): %s",
                          sum(len(v) for v in by_date.values()), len(by_date), sorted(by_date))

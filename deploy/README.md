@@ -39,9 +39,9 @@ journalctl -u orderbook-logger -f
 ```
 
 ## Operate
-- **Output:** `/opt/weather-alpha/data/orderbook/<EVENT-DATE>/<ticker>.jsonl` while a
-  day is trading; auto-zipped to `<EVENT-DATE>.zip` once that event settles.
-- **Retrieve zips:** `rsync -av user@vm:/opt/weather-alpha/data/orderbook/*.zip ./`
+- **Output:** `/opt/weather-alpha/data/orderbook/<SERIES>/<EVENT-DATE>/<ticker>.jsonl` while a
+  day is trading; auto-zipped **per city** to `<SERIES>/<EVENT-DATE>.zip` once that event settles.
+- **Retrieve zips:** `rsync -av user@vm:/opt/weather-alpha/data/orderbook/*/*.zip ./` (per city; or `.../data/orderbook/KXHIGHCHI/*.zip` for one)
   (or a daily cron pushing to cloud storage — optional hardening).
 - **Cadence:** edit `--interval` in the unit (`60` = 1-min, `300` = 5-min). 1-min is
   ~0.2 req/s, far under Kalshi's public limit.

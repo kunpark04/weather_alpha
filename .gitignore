@@ -28,8 +28,9 @@ hrrr/
 # Local Claude Code agent state
 .claude/
 
-# Data parquets are derivable from refresh_data.py / backfill_hrrr.py
+# Data parquets/CSVs are derivable (refresh_data.py / backfill_hrrr.py / analysis scripts)
 data/*.parquet
+data/*.csv
 
 # Runtime state for the bot (positions snapshot, kill switch, scheduler state)
 data/positions.json

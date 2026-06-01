@@ -1,7 +1,7 @@
-"""Always-on Kalshi orderbook logger for the KXHIGHCHI series (Chicago daily-high).
+"""Always-on Kalshi orderbook logger for daily-high series (Chicago KXHIGHCHI + Houston KXHIGHTHOU).
 
 Polls PUBLIC (no-auth) Kalshi market-data every `--interval` seconds and logs the
-full order book + top-of-book for EVERY currently-open KXHIGHCHI market — handling
+full order book + top-of-book for EVERY currently-open market in each configured series — handling
 the case where TWO event-days are open at once (verified live: 26MAY29 + 26MAY30).
 
   - GET /markets?series_ticker=KXHIGHCHI&status=open  (paginated) -> all open markets
@@ -55,7 +55,7 @@ except Exception:  # pragma: no cover
     CHICAGO = timezone.utc
 
 BASE = "https://api.elections.kalshi.com/trade-api/v2"
-SERIES = "KXHIGHCHI"
+SERIES = ["KXHIGHCHI", "KXHIGHTHOU"]   # series to log (Chicago + Houston); override with --series
 UA = {"User-Agent": "weather-alpha-orderbook-logger/1.0", "Accept": "application/json"}
 
 log = logging.getLogger("orderbook_logger")
@@ -68,18 +68,19 @@ def _http_json(url: str, timeout: float = 20.0) -> dict:
 
 
 def fetch_open_markets() -> list[dict]:
-    """All currently-open markets across ALL open KXHIGHCHI events (paginated)."""
+    """All currently-open markets across every open event in each configured series (paginated)."""
     out: list[dict] = []
-    cursor = ""
-    for _ in range(20):  # hard page cap (safety)
-        url = f"{BASE}/markets?series_ticker={SERIES}&status=open&limit=100"
-        if cursor:
-            url += f"&cursor={cursor}"
-        j = _http_json(url)
-        out.extend(j.get("markets", []))
-        cursor = j.get("cursor") or ""
-        if not cursor:
-            break
+    for series in SERIES:
+        cursor = ""
+        for _ in range(20):  # hard page cap (safety), per series
+            url = f"{BASE}/markets?series_ticker={series}&status=open&limit=100"
+            if cursor:
+                url += f"&cursor={cursor}"
+            j = _http_json(url)
+            out.extend(j.get("markets", []))
+            cursor = j.get("cursor") or ""
+            if not cursor:
+                break
     return out
 
 
@@ -170,11 +171,15 @@ def _handle_stop(signum, frame):
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Always-on Kalshi KXHIGHCHI orderbook logger")
+    global SERIES
+    ap = argparse.ArgumentParser(description="Always-on Kalshi daily-high orderbook logger")
     ap.add_argument("--interval", type=float, default=60.0, help="seconds between polls (default 60)")
     ap.add_argument("--out", default="data/orderbook", help="output base dir")
+    ap.add_argument("--series", default=",".join(SERIES),
+                    help="comma-separated Kalshi series to log (default: %(default)s)")
     ap.add_argument("--once", action="store_true", help="single cycle then exit (test)")
     args = ap.parse_args(argv)
+    SERIES = [s.strip() for s in args.series.split(",") if s.strip()]
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     signal.signal(signal.SIGINT, _handle_stop)
@@ -182,7 +187,8 @@ def main(argv=None) -> int:
 
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    log.info("orderbook logger up | interval=%ss | out=%s | tz=%s", args.interval, out, CHICAGO)
+    log.info("orderbook logger up | series=%s | interval=%ss | out=%s | tz=%s",
+             ",".join(SERIES), args.interval, out, CHICAGO)
 
     while not _STOP:
         t0 = time.monotonic()
@@ -195,7 +201,7 @@ def main(argv=None) -> int:
                 log.info("logged %d markets across %d event(s): %s",
                          sum(len(v) for v in by_date.values()), len(by_date), sorted(by_date))
             else:
-                log.warning("no open KXHIGHCHI markets right now")
+                log.warning("no open markets for %s right now", ",".join(SERIES))
             zip_settled_days(out, open_dates, today)
         except urllib.error.HTTPError as e:
             log.warning("HTTP %s polling Kalshi: %s", e.code, e.reason)

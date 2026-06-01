@@ -9,7 +9,7 @@
 # WantedBy=multi-user.target -> also starts automatically after a host reboot.
 
 [Unit]
-Description=Kalshi KXHIGHCHI orderbook logger (weather-alpha)
+Description=Kalshi daily-high orderbook logger — KXHIGHCHI + KXHIGHTHOU (weather-alpha)
 After=network-online.target
 Wants=network-online.target
 

@@ -215,3 +215,29 @@ journalctl --user -u weather-alpha-live.service -f            # watch the ENTER/
   live one-shot timer AND the live resident, both for Chicago) — they'd both place real orders and
   double-trade. A **LIVE process plus a PAPER process for the same city is fine** — paper places no
   real orders, so it's a harmless (and useful) shadow-test of the live decision.
+
+---
+
+# TL;DR — one-script local setup (bots + logger)
+
+For a local Linux box, one script does ALL the one-time plumbing (venv + base install, isolated
+state dirs, the LIVE creds template, and installing the three `systemd --user` units — rewriting
+their paths to wherever you cloned). Then activation is two command lines.
+
+```bash
+git pull                                   # get the deploy artifacts
+bash deploy/setup-local.sh                 # idempotent one-time setup; prints the activate lines
+# then edit secrets/kalshi-rw.env (key id) + drop your RW PEM at secrets/readwrite-private-key.pem
+# (only the LIVE bot needs creds; the paper bots + logger are keyless)
+
+# activate — safe (no creds / no real orders): CHI+HOU paper bots + CHI+HOU depth logger
+systemctl --user enable --now weather-alpha-paper.service orderbook-logger-user.service
+# go live — REAL orders on Chicago at 1 PM CT (~$2.50/trade):
+systemctl --user enable --now weather-alpha-live.service
+```
+
+Installs three `--user` units: `weather-alpha-live` (`config/live.yaml`), `weather-alpha-paper`
+(`config/paper.yaml`, CHI+HOU shadow), `orderbook-logger-user` (KXHIGHCHI + KXHIGHTHOU depth).
+Stop a service with `systemctl --user disable --now <unit>`; emergency-halt the live bot with
+`python scripts/kill.py --config config/live.yaml`. `setup-local.sh` is idempotent — safe to re-run
+after a `git pull`.

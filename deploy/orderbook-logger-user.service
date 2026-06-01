@@ -1,0 +1,17 @@
+# systemd --user variant of the orderbook logger (keyless; logs KXHIGHCHI + KXHIGHTHOU depth).
+# Installed by deploy/setup-local.sh (which rewrites %h/weather-alpha to your actual clone path).
+# Manual install: cp to ~/.config/systemd/user/ only if your clone is at ~/weather-alpha.
+[Unit]
+Description=Kalshi daily-high orderbook logger (weather-alpha, --user)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/weather-alpha
+ExecStart=%h/weather-alpha/.venv/bin/python %h/weather-alpha/scripts/orderbook_logger.py --interval 60 --out %h/weather-alpha/data/orderbook
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,13 @@
+# Fires weather-alpha-houston.service RIGHT AT 1:00 PM America/Chicago (Houston is also Central).
+# AccuracySec=1s => triggers within ~1 s of 13:00:00. Requires host NTP on for an accurate clock.
+[Unit]
+Description=Trigger Weather Alpha Houston PAPER at 1:00 PM America/Chicago
+
+[Timer]
+OnCalendar=*-*-* 13:00:00 America/Chicago
+AccuracySec=1s
+# PAPER: catch-up is harmless (no real money) and yields more forward data.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

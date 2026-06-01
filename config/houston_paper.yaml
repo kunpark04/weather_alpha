@@ -1,0 +1,80 @@
+# Houston PAPER instance — forward paper-trade of the #2 candidate (OOS-survivor, thin).
+# mode: paper => places NO real orders and needs NO creds; only reads public market data.
+# Isolated state under data/houston/ + logs/houston (never touches the Chicago-live state).
+# Houston is Central time / 1 PM anchor, same clock as Chicago.
+mode: paper                       # paper only — no real money, no creds needed
+station: KHOU                     # Houston Hobby — VERIFIED 2026-05-31: Kalshi KXHIGHTHOU settles on
+                                  # NWS CLI site=HGX&issuedby=HOU (Hobby); fetch_live_cli('KHOU') confirmed working
+
+local_tz: America/Chicago         # Houston is Central
+
+paths:
+  data_dir: data
+  model_dir: data/model_v3_artifacts          # unused (model-free)
+  live_log: data/houston/live_log.parquet
+  positions_snapshot: data/houston/positions.json
+  notebook_v3: notebooks/model_v3.ipynb
+  logs_dir: logs/houston
+  kill_switch: data/houston/KILL_SWITCH
+  scheduler_state: data/houston/scheduler_state.json
+
+model:
+  name: v3
+  anchor_hour_local: 13
+  enabled: false
+
+strategy:
+  name: market_wing
+  bankroll_usd: 25.0
+  kelly_fraction: 0.25
+  wing:
+    drop_lower_ask: true
+    require_agreement: false
+    anchor: market
+    assumed_win_prob: 0.92
+    max_ask_sum: 0.90
+    sizing_mode: equal_payout
+    flat_usd: 2.5
+    fee_aware: true
+  kl_concentration_alpha: 1.0
+  edge_floor_cents: 1
+  per_contract_max_pct: 0.20
+  total_exposure_max_pct: 0.60
+  regime_throttle:
+    hrrr_persistence_gap_max_f: 8
+    confidence_floor_top1: 0.20
+
+execution:
+  fill_model: ask
+  slippage_cents: 0
+  intraday_refresh_minutes: 60
+  market_event_pattern: KXHIGHTHOU
+
+kalshi:
+  api_base: https://api.elections.kalshi.com/trade-api/v2
+  key_id_env: KALSHI_KEY_ID
+  private_key_path_env: KALSHI_PRIVATE_KEY_PATH
+  rest_poll_seconds: 30
+  request_timeout_seconds: 15
+
+data:
+  asos_source: auto
+  synoptic_token_env: SYNOPTIC_TOKEN
+  metar_obs_limit: 40
+  taf_hours_back: 36
+  asos_hours_back: 48
+  cli_days_back: 30
+  hrrr_publish_lag_min: 90
+
+scheduler:
+  anchor_grace_minutes: 0         # fire AT the 1 PM anchor, no buffer (only --loop uses this)
+  data_refresh_minutes: 15
+  predict_lookback_hours: 2
+
+risk:
+  daily_max_loss_usd: 100.0
+  per_anchor_max_trades: 6
+
+ui:
+  refresh_hz: 4
+  theme: dark

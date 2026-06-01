@@ -1,0 +1,79 @@
+# Chicago LIVE instance — the validated production edge (market_wing, model-free, 1 PM).
+# Running this with real creds places REAL orders on your Kalshi account.
+# Isolated state under data/chicago/ + logs/chicago so it never collides with the
+# Houston paper instance. Starts with a FRESH Book (no inherited paper positions);
+# verify_bankroll adopts the real balance at activation.
+mode: live                        # <-- REAL MONEY
+station: KMDW
+local_tz: America/Chicago
+
+paths:
+  data_dir: data
+  model_dir: data/model_v3_artifacts          # unused (model-free), kept for schema
+  live_log: data/chicago/live_log.parquet
+  positions_snapshot: data/chicago/positions.json
+  notebook_v3: notebooks/model_v3.ipynb
+  logs_dir: logs/chicago
+  kill_switch: data/chicago/KILL_SWITCH
+  scheduler_state: data/chicago/scheduler_state.json
+
+model:
+  name: v3
+  anchor_hour_local: 13
+  enabled: false                  # model-free: market_wing ignores the model
+
+strategy:
+  name: market_wing
+  bankroll_usd: 25.0              # hint only; LIVE adopts the real get_balance()
+  kelly_fraction: 0.25
+  wing:
+    drop_lower_ask: true
+    require_agreement: false
+    anchor: market
+    assumed_win_prob: 0.92
+    max_ask_sum: 0.90
+    sizing_mode: equal_payout
+    flat_usd: 2.5                 # flat $2.50/trade (fixed risk; confirm forward before scaling)
+    fee_aware: true
+  kl_concentration_alpha: 1.0
+  edge_floor_cents: 1
+  per_contract_max_pct: 0.20
+  total_exposure_max_pct: 0.60
+  regime_throttle:
+    hrrr_persistence_gap_max_f: 8
+    confidence_floor_top1: 0.20
+
+execution:
+  fill_model: ask
+  slippage_cents: 0
+  intraday_refresh_minutes: 60
+  market_event_pattern: KXHIGHCHI
+
+kalshi:
+  api_base: https://api.elections.kalshi.com/trade-api/v2
+  key_id_env: KALSHI_KEY_ID
+  private_key_path_env: KALSHI_PRIVATE_KEY_PATH
+  rest_poll_seconds: 30
+  request_timeout_seconds: 15
+
+data:
+  asos_source: auto
+  synoptic_token_env: SYNOPTIC_TOKEN
+  metar_obs_limit: 40
+  taf_hours_back: 36
+  asos_hours_back: 48
+  cli_days_back: 30
+  hrrr_publish_lag_min: 90
+
+scheduler:
+  anchor_grace_minutes: 0         # fire AT the 1 PM anchor, no buffer (only --loop uses this; the one-shot timer is the clock)
+  data_refresh_minutes: 15
+  predict_lookback_hours: 2
+
+risk:
+  daily_max_loss_usd: 100.0
+  per_anchor_max_trades: 6
+
+ui:
+  refresh_hz: 4
+  theme: dark

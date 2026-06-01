@@ -1,0 +1,15 @@
+# systemd --user one-shot: Chicago LIVE daily anchor.
+# WARNING: config/chicago_live.yaml is mode: live -> this places REAL orders.
+# Install to ~/.config/systemd/user/.  Edit WorkingDirectory + venv + EnvironmentFile
+# paths if your clone is not at ~/weather-alpha.  Reads the read-WRITE Kalshi creds
+# from the EnvironmentFile (Houston paper needs none).
+[Unit]
+Description=Weather Alpha - Chicago LIVE daily anchor (one-shot)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/weather-alpha
+EnvironmentFile=%h/weather-alpha/secrets/kalshi-rw.env
+ExecStart=%h/weather-alpha/.venv/bin/python -m weather_alpha --headless --config config/chicago_live.yaml
+StandardOutput=journal
+StandardError=journal

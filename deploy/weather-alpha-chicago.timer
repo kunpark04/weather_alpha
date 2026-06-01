@@ -1,0 +1,17 @@
+# Fires weather-alpha-chicago.service RIGHT AT 1:00 PM America/Chicago (the anchor).
+# AccuracySec=1s => triggers within ~1 s of 13:00:00 (systemd never fires BEFORE OnCalendar),
+# as close to the 13:00 backtest snapshot as possible. REQUIRES host NTP on (`timedatectl
+# set-ntp true`) so 13:00:00 wall-clock is real-time accurate -- otherwise a fast clock could
+# read a pre-1 PM book. DST handled by the tz suffix.
+[Unit]
+Description=Trigger Weather Alpha Chicago LIVE at 1:00 PM America/Chicago
+
+[Timer]
+OnCalendar=*-*-* 13:00:00 America/Chicago
+AccuracySec=1s
+# LIVE: do NOT catch up a missed run -> avoids placing an off-anchor REAL trade late.
+# A skipped day's prior-position settlement still happens on the next successful run.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

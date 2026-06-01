@@ -1,0 +1,12 @@
+# systemd --user one-shot: Houston PAPER daily anchor.
+# config/houston_paper.yaml is mode: paper -> places NO real orders and needs NO creds.
+# Install to ~/.config/systemd/user/.  Edit paths if your clone is not at ~/weather-alpha.
+[Unit]
+Description=Weather Alpha - Houston PAPER daily anchor (one-shot)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/weather-alpha
+ExecStart=%h/weather-alpha/.venv/bin/python -m weather_alpha --headless --config config/houston_paper.yaml
+StandardOutput=journal
+StandardError=journal

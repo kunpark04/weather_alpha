@@ -5,6 +5,30 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L8 — Gitignore the secrets DIRECTORY, not just file extensions
+
+**Problem.** The repo `.gitignore` had `.env`, `*.key`, `*.pem` — which protected the PEM, but on
+the live VM `secrets/kalshi-rw.env` (not literally `.env`) and `secrets/readwrite-key-id` (no
+extension at all) were **NOT ignored** and showed as stage-able in `git status`. Extension-based
+rules silently miss credential files with non-standard names. The security audit caught it; no
+secret had actually been committed (the PEM stayed ignored, repo private), but a stray
+`git add -A` on the VM would have committed the key id.
+
+**Solution / rules.**
+- **Ignore the whole secrets directory** (`secrets/`) plus `*.env`, not just `*.pem`/`*.key`/`.env`.
+  A directory rule catches every credential file regardless of name/extension (`readwrite-key-id`,
+  `kalshi-rw.env`, future additions).
+- **Verify with `git check-ignore` on the actual secret paths** — not just "we have a .gitignore" —
+  and on **every host that holds secrets** (the deploy box, not only dev). This gap existed *only*
+  on the VM; the local tree happened to never have those files.
+- **Scan full history, all branches** for leakage (`git rev-list --all` + `git grep 'PRIVATE KEY'`),
+  not just the current tree — a committed secret persists in history even after deletion.
+
+**Why it matters.** Extension-based secret ignores give false confidence; the one credential file
+without a matching extension (an API key id) is exactly the one that slips into a commit.
+
+---
+
 ## L7 — CRLF breaks bash piped from PowerShell; run remote bash single-line or strip CRs
 
 **Problem.** Going live, I piped PowerShell here-strings (`@'...'@`) to remote `ssh … bash -s`.

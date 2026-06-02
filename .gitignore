@@ -14,8 +14,10 @@ Thumbs.db
 
 # Secrets
 .env
+*.env
 *.key
 *.pem
+secrets/
 
 # Herbie cache (if it lands locally)
 hrrr/
@@ -36,3 +38,8 @@ data/*.csv
 data/positions.json
 data/KILL_SWITCH
 data/scheduler_state.json
+
+# Per-process runtime dirs (per-city state + orderbook captures — public data, not secret)
+data/live/
+data/paper/
+data/orderbook/

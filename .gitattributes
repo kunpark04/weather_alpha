@@ -1,0 +1,7 @@
+# Line-ending policy.
+# Normalize text files to LF inside the repository; working copies use native endings.
+* text=auto
+
+# Shell scripts must stay LF on every platform — they run on the Linux bot/logger host,
+# and CRLF would break the `#!/usr/bin/env bash` shebang ("bad interpreter" error).
+*.sh text eol=lf

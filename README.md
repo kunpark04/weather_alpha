@@ -16,6 +16,12 @@ resident process (all cities, one per mode) or as per-city one-shots fired by a 
 **Mode:** paper trading (Kalshi key validated for reads; the first live order/fill is still
 unexercised). Mode is **per-process** — one LIVE process, one PAPER process, never mixed.
 
+**Deployed 2026-06-02:** the PAPER bot (CHI+HOU) + the orderbook logger run **24/7 on a
+DigitalOcean droplet** (`systemd --user` + linger; survives reboot). A daily Task-Scheduler job
+on the local box pulls each settled-day orderbook zip down (move-mode). Phase 7 (paper week) is
+now running on the always-on host; the LIVE service is installed but not started. See
+[`HANDOFF.md`](HANDOFF.md) §7 `DEPLOY`.
+
 > **Production pivoted 2026-05-29 → `market_wing + drop_lower_ask`, flat-$ sizing, model-free**
 > (strategy unchanged since). Wired into the engine and validated in paper (no model, no weather,
 > no creds). On the real **$25** account (flat $2.50, fee-aware): **24 fires, 96 % WR, +$7.98
@@ -164,8 +170,8 @@ From [`HANDOFF.md`](HANDOFF.md) §7:
 
 1. ✅ **Strategy wired** — model-free `market_wing` + flat-$ dispatched from config (replaced `joint_kelly`)
 2. ✅ **Multi-market engine built + hardened** — `markets:` list under one shared Book, drawdown halts, exposure cap; two review passes, 28 tests pass (`MULTIMKT`/`REVIEW`)
-3. **Phase 7 — run the multi-market PAPER bot ~1 week** (`config/paper.yaml`, both cities) before migrating any city LIVE
-4. **Go live** — Kalshi RSA creds validated for reads; remaining: a `mode: live` dry-run + an always-on host. **The first live order/fill is still unexercised.** On activation the engine verifies the real bankroll from `get_balance()` ($25 config is only a hint)
-5. ⚠️ **Make the TUI a read-only monitor** — the one deferred review item; it still drives trading via the old single-tz scheduler (`TUI`)
-6. **Deploy the orderbook logger always-on** — `scripts/orderbook_logger.py` on a VM/Pi (`deploy/README.md`); keyless, survives reboots
+3. ✅ **Deployed always-on (2026-06-02)** — PAPER bot (CHI+HOU) + orderbook logger run 24/7 on a DigitalOcean droplet (`systemd --user`); daily local pull of orderbook zips in move-mode (`DEPLOY`)
+4. **Phase 7 — paper week now running** on the DO host (`config/paper.yaml`, both cities) before migrating any city LIVE
+5. **Go live** — always-on host now exists; remaining: watch a few paper 1 PM CT cycles, then upload the read-write key to the VM + enable `weather-alpha-live.service`. **The first live order/fill is still unexercised**; on activation the engine verifies the real bankroll from `get_balance()` ($25 config is only a hint)
+6. ⚠️ **Make the TUI a read-only monitor** — the one deferred review item; it still drives trading via the old single-tz scheduler (`TUI`)
 7. Expose flat-$ in `backtest_strategy.py` (`--wing-flat-usd` / `--wing-fee-aware`) so the production figure reproduces from one command

@@ -5,6 +5,30 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L6 — Hand the user single-line commands to paste; `\`-continuations break on paste
+
+**Problem.** Twice this session a multi-line shell command I gave (a `\`-continued `git clone`,
+then a `\`-continued `printf … >> authorized_keys`) failed when the user pasted it: the
+backslash-newline arrived as backslash-**space**, so bash read `\ ` as an escaped literal space
+and mangled the command — the clone got a bogus URL (` git@github.com…` → wrong SSH user →
+"Permission denied"), and the printf detached from its `>>` redirect (key printed to screen,
+never written). Both *looked* like auth/file failures but were pure paste-mangling.
+
+**Solution / rules.**
+- **A command for the user to paste must be ONE physical line** — no `\` continuations. A single
+  long line pastes intact; a continued one frequently splits at the backslash.
+- **Make it fail safe if it does split.** Avoid `… && rm` / `… >> file` tails that, detached,
+  would execute or truncate something. For appending a key, a single `echo 'KEY' >> file` beats a
+  multi-clause `printf … && chmod`.
+- **Always pair a fragile write with a verify step** (`tail -2 authorized_keys`, `ssh -T`) so a
+  silent no-op surfaces immediately, not two steps later.
+
+**Why it matters.** A mangled-on-paste command throws a *misleading* error (auth/repo, not
+syntax) that sends debugging down the wrong path — exactly what happened twice before we spotted
+the backslash.
+
+---
+
 ## L5 — Verify on REAL data/runtime, not just mocks; unit tests miss the parse-level crash
 
 **Problem.** The 28 multi-market unit tests all passed, yet the first PAPER smoke run against

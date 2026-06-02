@@ -18,7 +18,10 @@ retained for the model-enabled path but is **not** used by the production strate
 
 **Mode is per-process** (one LIVE process, one PAPER process — never mixed in a Book). Live
 is wired + the authenticated read path is validated, but the first live order/fill is still
-unexercised; both processes today are paper. See [`HANDOFF.md`](HANDOFF.md) §1.5, §7.
+unexercised; both processes today are paper. **Deployed 2026-06-02:** the PAPER bot (CHI+HOU)
++ orderbook logger run 24/7 on a DigitalOcean droplet (`systemd --user`), with a daily local
+pull of the orderbook zips; the LIVE service is installed but not started. See
+[`HANDOFF.md`](HANDOFF.md) §1.5, §7 (`DEPLOY`/`L2`).
 
 ---
 

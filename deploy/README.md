@@ -271,7 +271,8 @@ state dirs, the LIVE creds template, and installing the three `systemd --user` u
 their paths to wherever you cloned). Then activation is two command lines.
 
 ```bash
-git pull                                   # get the deploy artifacts
+sudo apt update && sudo apt install -y python3-venv python3.12-venv python3-pip git rsync  # fresh Ubuntu 24.04: venv module + git aren't in the base image
+git pull                                   # get the deploy artifacts (first time: clone — see Option B above)
 bash deploy/setup-local.sh                 # idempotent one-time setup; prints the activate lines
 # then edit secrets/kalshi-rw.env (key id) + drop your RW PEM at secrets/readwrite-private-key.pem
 # (only the LIVE bot needs creds; the paper bots + logger are keyless)

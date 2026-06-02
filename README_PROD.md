@@ -16,6 +16,11 @@ current production strategy runs **model-free**.
 > The authenticated **read** path is validated, but the **first live order/fill is still
 > unexercised**. LIVE needs only free Kalshi RSA creds + `mode: live` — no weather feed, no
 > same-day anchor. See [§ Going LIVE](#going-live).
+>
+> **Deployed 2026-06-02:** PAPER (CHI+HOU) + the orderbook logger run 24/7 on a DigitalOcean
+> droplet (`systemd --user` + linger); a daily local pull collects the orderbook zips
+> (move-mode). The LIVE service is installed but **not started** — Phase 7 paper week in
+> progress. Host + pull details: [`deploy/README.md`](deploy/README.md) and HANDOFF §7 `DEPLOY`.
 
 ---
 
@@ -250,13 +255,14 @@ order is genuinely untested:
 - [ ] Confirm the read path: `python scripts/check_kalshi_auth.py` PASSES (it already does with
       both RO and RW keys; balance parses). LIVE adopts the real balance via `get_balance()` at
       startup + re-syncs after settlement — config `bankroll_usd` is only a hint. Do not start large.
-- [ ] **Phase 7 — run the multi-market PAPER bot ~1 week** (`config/paper.yaml`, both cities)
-      before flipping any city LIVE. The loop/settlement/risk/reporter are validated in paper;
-      the **LIVE order-placement + real-fill path is still unexercised** (0 open positions).
+- [~] **Phase 7 — running**: the PAPER bot (`config/paper.yaml`, both cities) is live 24/7 on
+      the DO droplet since 2026-06-02 (HANDOFF §7 `DEPLOY`) — watch a few 1 PM CT cycles before
+      flipping any city LIVE. The loop/settlement/risk/reporter are validated in paper; the
+      **LIVE order-placement + real-fill path is still unexercised** (0 open positions).
 - [ ] Set `risk.daily_max_loss_usd` + the drawdown pcts to numbers you can lose without flinching.
 - [ ] Dry-run a single LIVE city by hand and read the log — confirm the orders that *would* be
       placed match intuition. (Model-free needs no `--anchor` or weather; anchor = today's event.)
-- [ ] Deploy on an always-on host so each 1 PM anchor fires with your laptop off — see [§ Deploy](#deploy).
+- [x] Deploy on an always-on host — ✅ DONE: PAPER + logger run 24/7 on a DO droplet (HANDOFF §7 `DEPLOY`). For LIVE, upload the read-write key to the VM, then `systemctl --user enable --now weather-alpha-live.service`.
 
 > Retired gates: the old "30 paper days" and "adopt Synoptic for same-day data" requirements
 > no longer apply — `market_wing` is model-free (HANDOFF §1.5), and at $25 this is deliberate

@@ -41,12 +41,58 @@ journalctl -u orderbook-logger -f
 ## Operate
 - **Output:** `/opt/weather-alpha/data/orderbook/<SERIES>/<EVENT-DATE>/<ticker>.jsonl` while a
   day is trading; auto-zipped **per city** to `<SERIES>/<EVENT-DATE>.zip` once that event settles.
-- **Retrieve zips:** `rsync -av user@vm:/opt/weather-alpha/data/orderbook/*/*.zip ./` (per city; or `.../data/orderbook/KXHIGHCHI/*.zip` for one)
-  (or a daily cron pushing to cloud storage — optional hardening).
+- **Retrieve zips:** one-off — `rsync -av user@host:<clone>/data/orderbook/*/*.zip ./` (per city; or
+  `.../data/orderbook/KXHIGHCHI/*.zip` for one). For an automated daily copy to your own machine, see
+  **Pull settled-day zips to your local machine** just below (`scripts/pull-orderbook-zips.{sh,ps1}`).
 - **Cadence:** edit `--interval` in the unit (`60` = 1-min, `300` = 5-min). 1-min is
   ~0.2 req/s, far under Kalshi's public limit.
 - **No credentials required** — the logger uses Kalshi's public `/markets` +
   `/orderbook` endpoints. (Live *trading* is separate and needs the Kalshi RSA key.)
+
+## Pull settled-day zips to your local machine (scheduled)
+A laptop behind home NAT usually isn't reachable from the internet, so don't push from the
+host — **pull from your machine** on a schedule. Two ready scripts fetch each new
+`<series>/<date>.zip` down, with two modes:
+- **copy** (default) — leave each zip on the host as a backup; already-pulled zips are skipped.
+- **move** (`OB_MOVE=1`) — after a zip transfers *and is verified here*, delete it from the
+  host so it ends up **only** locally. The delete fires only once the local copy is confirmed
+  (rsync `--remove-source-files`; the `.ps1` checks the byte size matches), so a failed or
+  partial pull never deletes the remote. Only `*.zip` is ever touched — the live raw `.jsonl`
+  folders are never transferred or deleted, so the running logger is undisturbed.
+
+Because the logger only zips a day *after* it stops being open, a day's zip appears the next
+morning — the local copy runs ~1 day behind by design, and a missed run self-heals next time.
+
+Prereq: passwordless SSH from your machine to the host (key-based; for an unattended job the
+key must have no passphrase or live in an agent). Set the host via the `OB_HOST` env var (or
+edit the config block atop the script). `OB_REMOTE_DIR` defaults to
+`projects/weather-alpha/data/orderbook` (your clone path on the host); `OB_LOCAL_DIR`
+defaults to `~/weather-alpha-data/orderbook`.
+
+**Windows analysis box** — `scripts/pull-orderbook-zips.ps1` (native ssh/scp, no rsync):
+```powershell
+$env:OB_HOST = 'fa@your-logger-host'; $env:OB_MOVE = '1'   # OB_MOVE=1 -> delete host copy after verifying locally
+pwsh -NoProfile -File scripts\pull-orderbook-zips.ps1                 # test once
+# then a daily Scheduled Task (StartWhenAvailable catches up if the PC was asleep):
+$ps1 = (Resolve-Path scripts\pull-orderbook-zips.ps1).Path
+$act = New-ScheduledTaskAction  -Execute 'pwsh.exe' -Argument "-NoProfile -File `"$ps1`""
+$trg = New-ScheduledTaskTrigger -Daily -At 8am
+$set = New-ScheduledTaskSettingsSet -StartWhenAvailable
+[Environment]::SetEnvironmentVariable('OB_HOST','fa@your-logger-host','User')   # persist for the task
+[Environment]::SetEnvironmentVariable('OB_MOVE','1','User')
+Register-ScheduledTask -TaskName 'PullOrderbookZips' -Action $act -Trigger $trg -Settings $set
+```
+
+**Linux / macOS analysis box** — `scripts/pull-orderbook-zips.sh` (rsync):
+```bash
+OB_HOST=fa@your-logger-host OB_MOVE=1 bash scripts/pull-orderbook-zips.sh   # test once
+crontab -e        # then add a daily pull (move-mode; a missed run self-heals):
+# 0 8 * * *  OB_HOST=fa@your-logger-host OB_MOVE=1 /path/to/scripts/pull-orderbook-zips.sh >> ~/.cache/ob-pull.log 2>&1
+```
+
+Drop `OB_MOVE` to fall back to copy-mode (host keeps every zip). In copy-mode, if the host's
+disk later gets tight, prune already-pulled zips on the host with e.g.
+`find ~/projects/weather-alpha/data/orderbook -name '*.zip' -mtime +30 -delete`.
 
 ## Windows (if you must)
 A Windows laptop still won't survive shutdown. If you have an always-on Windows box,

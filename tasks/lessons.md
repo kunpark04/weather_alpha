@@ -5,6 +5,32 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L7 — CRLF breaks bash piped from PowerShell; run remote bash single-line or strip CRs
+
+**Problem.** Going live, I piped PowerShell here-strings (`@'...'@`) to remote `ssh … bash -s`.
+The here-strings carry Windows **CRLF**, and PowerShell also appends a trailing newline to the
+piped stream, so remote bash saw `\r`: it broke a `case` ("syntax error near unexpected token
+`newline`"), appended `\r` to a path (`check_kalshi_auth.py\r` → "No such file"), and corrupted
+the env file's value. Two failed iterations before I spotted the carriage returns.
+
+**Solution / rules.**
+- **Default to a single-line remote command:** `ssh host "cmd; cmd; cmd"` — no here-string, no
+  multi-line, no CRLF to leak. Reliable. (Use single-quoted PowerShell wrapping so `$(...)`/`$VAR`
+  evaluate on the remote, not locally.)
+- **If a multi-line script is unavoidable, don't pipe a Windows here-string** — strip CRs
+  (`$s.Replace("`r","")`) *and* expect a trailing newline on the pipe, or `scp` a real LF file and
+  run that. Piping `@'...'@` raw will always leak `\r`.
+- **A `\r` in the error is the tell.** "syntax error near unexpected token `newline`", or a path
+  printed with a trailing char that shouldn't be there, = CRLF — fix the endings, don't chase the
+  apparent auth/path/syntax bug.
+- Same line-ending family as L6 (single-line commands for the *user* to paste), different
+  direction (me → remote bash). When in doubt about line endings, go single-line.
+
+**Why it matters.** Like L6, the surface error points everywhere except the real cause (line
+endings), burning iterations on phantom auth/path bugs — costly mid-go-live.
+
+---
+
 ## L6 — Hand the user single-line commands to paste; `\`-continuations break on paste
 
 **Problem.** Twice this session a multi-line shell command I gave (a `\`-continued `git clone`,

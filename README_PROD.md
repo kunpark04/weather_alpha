@@ -6,7 +6,7 @@ shared Book, firing each at its own local 1 PM. Ships with the v3 ML model from
 `notebooks/model_v3.ipynb` (CRPS 1.204 °F, 46 features) — used only when `model.enabled`; the
 current production strategy runs **model-free**.
 
-> **Status:** PAPER, validated end-to-end (the multi-market paper bot runs all configured
+> **Status:** LIVE (Chicago) + PAPER shadow since 2026-06-02; validated end-to-end (the multi-market bot runs all configured
 > cities clean against the live market). **Production strategy = model-free
 > `market_wing + drop_lower_ask`, flat-$ sizing** (config `strategy.name` +
 > `model.enabled: false`), dispatched via `engine._dispatch_strategy` → `run_wing_strategy`.
@@ -17,10 +17,11 @@ current production strategy runs **model-free**.
 > unexercised**. LIVE needs only free Kalshi RSA creds + `mode: live` — no weather feed, no
 > same-day anchor. See [§ Going LIVE](#going-live).
 >
-> **Deployed 2026-06-02:** PAPER (CHI+HOU) + the orderbook logger run 24/7 on a DigitalOcean
-> droplet (`systemd --user` + linger); a daily local pull collects the orderbook zips
-> (move-mode). The LIVE service is installed but **not started** — Phase 7 paper week in
-> progress. Host + pull details: [`deploy/README.md`](deploy/README.md) and HANDOFF §7 `DEPLOY`.
+> **Live since 2026-06-02:** the LIVE bot (Chicago) + a PAPER bot (CHI+HOU shadow) + the
+> orderbook logger run 24/7 on a DigitalOcean droplet (`systemd --user` + linger); a daily local
+> pull collects the orderbook zips (move-mode). The LIVE bot is armed (RW key on the VM, auth
+> PASS, adopted the real $23.56 balance); its first real order fires at the next 1 PM CT anchor.
+> Host + pull + go-live details: [`deploy/README.md`](deploy/README.md) and HANDOFF §7 `DEPLOY`/`L2`.
 
 ---
 
@@ -262,7 +263,7 @@ order is genuinely untested:
 - [ ] Set `risk.daily_max_loss_usd` + the drawdown pcts to numbers you can lose without flinching.
 - [ ] Dry-run a single LIVE city by hand and read the log — confirm the orders that *would* be
       placed match intuition. (Model-free needs no `--anchor` or weather; anchor = today's event.)
-- [x] Deploy on an always-on host — ✅ DONE: PAPER + logger run 24/7 on a DO droplet (HANDOFF §7 `DEPLOY`). For LIVE, upload the read-write key to the VM, then `systemctl --user enable --now weather-alpha-live.service`.
+- [x] Deploy on an always-on host — ✅ DONE (HANDOFF §7 `DEPLOY`). **LIVE now armed (2026-06-02):** RW key uploaded, auth pre-flight PASSED, `weather-alpha-live.service` enabled + running on Chicago; first real order at the next 1 PM CT anchor.
 
 > Retired gates: the old "30 paper days" and "adopt Synoptic for same-day data" requirements
 > no longer apply — `market_wing` is model-free (HANDOFF §1.5), and at $25 this is deliberate

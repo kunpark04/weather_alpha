@@ -109,6 +109,24 @@ def _sign_request(key: rsa.RSAPrivateKey, timestamp_ms: int, method: str, path: 
     return base64.b64encode(sig).decode("ascii")
 
 
+# Order-rate-throttle hardening: Kalshi rejects orders placed too rapidly in a burst with HTTP 400
+# code=invalid_parameters (observed in live smoke testing). The SAME code is also used for a
+# genuinely malformed order, so we can't distinguish them — we retry a FEW times with backoff then
+# give up: a transient throttle clears on the backoff, a truly bad order just fails after the
+# retries (a few seconds later). A 400 means the order was NOT created, so re-sending the same
+# client_order_id across retries cannot double-fill.
+_ORDER_RATE_RETRIES = 3
+_ORDER_RATE_BACKOFF_S = 0.5
+
+
+def _is_rate_throttle(resp) -> bool:
+    """True if a 400 response is Kalshi's order-rate throttle (code=invalid_parameters)."""
+    try:
+        return (resp.json().get("error") or {}).get("code") == "invalid_parameters"
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -232,7 +250,18 @@ class KalshiClient:
         payload = {k: v for k, v in payload.items() if v is not None}
         logger.info("Kalshi place_order %s %s %s x %d @ %d¢", action, side, ticker,
                     count, limit_price_cents)
-        return await self._signed_request("POST", "/portfolio/orders", json=payload)
+        for attempt in range(_ORDER_RATE_RETRIES):
+            try:
+                return await self._signed_request("POST", "/portfolio/orders", json=payload)
+            except httpx.HTTPStatusError as e:
+                if (e.response.status_code == 400 and attempt + 1 < _ORDER_RATE_RETRIES
+                        and _is_rate_throttle(e.response)):
+                    logger.warning("place_order %s: 400 invalid_parameters (rate throttle?) — "
+                                   "retry %d/%d after backoff", ticker, attempt + 1, _ORDER_RATE_RETRIES)
+                    await asyncio.sleep(_ORDER_RATE_BACKOFF_S * (2 ** attempt))
+                    continue
+                raise
+        raise RuntimeError("unreachable")  # loop always returns or raises within the retry budget
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
         logger.info("Kalshi cancel_order %s", order_id)

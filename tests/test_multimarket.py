@@ -13,6 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import httpx
 import pandas as pd
 import yaml
 
@@ -722,6 +723,60 @@ def test_w4_recon_overwrites_estimated_fee_with_exchange_truth():
                    bucket_spec="1-2", opened_utc="t", anchor_date="2026-06-01", station="S")
     book2.reconcile_fees([KalshiPosition(ticker="X-Y", side="yes", contracts=2, avg_price_cents=40)])
     assert book2.fees_paid_cents == 5                             # unchanged (0 -> skipped)
+
+
+def _http_400(code):
+    # build an httpx.HTTPStatusError carrying a Kalshi-style {"error":{"code":...}} 400 body
+    resp = httpx.Response(400, json={"error": {"code": code, "message": code}},
+                          request=httpx.Request("POST", "http://x"))
+    return httpx.HTTPStatusError(code, request=resp.request, response=resp)
+
+
+def test_place_order_retries_on_400_rate_throttle():
+    # ORDER-RATE HARDENING: a 400 invalid_parameters (Kalshi's order-burst throttle, observed in live
+    # testing) is retried with backoff and succeeds once the throttle clears — instead of bubbling up
+    # as a hard leg error that would trigger a flatten/skip. Re-sending the same client_order_id is
+    # safe because a 400 means the order was NOT created.
+    cli = KalshiClient(load_config(_write_cfg([_CHI], mode="live"), require_live_creds=False).kalshi,
+                       authenticated=False)
+    n = {"calls": 0}
+    async def fake(method, path, *, json=None):
+        n["calls"] += 1
+        if n["calls"] == 1:
+            raise _http_400("invalid_parameters")
+        return {"order": {"order_id": "ok-after-retry"}}
+    cli._signed_request = fake
+    async def run():
+        try:
+            return await cli.place_order(ticker="KXHIGHCHI-26JUN01-B72.5", side="yes",
+                                         action="buy", count=1, limit_price_cents=50)
+        finally:
+            await cli.close()
+    ack = asyncio.run(run())
+    assert n["calls"] == 2 and ack["order"]["order_id"] == "ok-after-retry"
+
+
+def test_place_order_does_not_retry_non_rate_400():
+    # a NON-rate 400 (e.g. invalid_order — a genuinely malformed order) is raised immediately, NOT
+    # retried, so a real order bug surfaces fast instead of being masked by the throttle retries.
+    cli = KalshiClient(load_config(_write_cfg([_CHI], mode="live"), require_live_creds=False).kalshi,
+                       authenticated=False)
+    n = {"calls": 0}
+    async def fake(method, path, *, json=None):
+        n["calls"] += 1
+        raise _http_400("invalid_order")
+    cli._signed_request = fake
+    async def run():
+        try:
+            await cli.place_order(ticker="X", side="yes", action="buy", count=1, limit_price_cents=50)
+        finally:
+            await cli.close()
+    try:
+        asyncio.run(run())
+        assert False, "expected HTTPStatusError to propagate"
+    except httpx.HTTPStatusError:
+        pass
+    assert n["calls"] == 1                                        # raised on first attempt, no retry
 
 
 def test_cycle_level_daily_loss_gate_blocks_orders_but_runs_settlement():

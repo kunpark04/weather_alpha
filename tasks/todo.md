@@ -43,3 +43,37 @@ Strategy chosen: **market_wing + drop_lower_ask**, **flat-$ sizing** (see memory
 ## Phase 5 — Harden (deferred; low-$ impact at $25)
 - [ ] Poll `/portfolio/fills` + `/portfolio/balance`; replace the limit=fill stub
 - [ ] Enforce `per_anchor_max_trades`; gate on open intraday exposure
+
+---
+
+# Engine review 2026-06-02 — fix implementation (in place, strat_prod_1, no commit/deploy)
+
+Source: `tasks/engine_review_2026-06-02.md`. LIVE code (Chicago bot armed). Preserve 28
+passing tests; K=1 behavior identical. Designs in the user brief override the report.
+
+## WARN (correctness, with tests) — ALL DONE ✅
+- [x] **W1 — per-cycle order budget.** `RunBudget` in `run_cycle` threaded into each `execute()`.
+      NOTE: with W2 atomicity, cap=6 + two 4-leg wings places **4** (one full wing), not the
+      report's "6" (a wing can't be split to consume the last 2). 4≠8 proves the cap is shared.
+- [x] **W2 — atomic wing vs risk gates.** `_gate_wing` checks the FULL wing once; places all or
+      none. Mid-wing leg error after ≥1 fill → `_flatten_legs` (sell @ 1¢ marketable) + remove
+      from Book; flatten fail → CRITICAL + keep in Book.
+- [x] **W3 — unique coid + partial cancel.** coid `+ run_utc_ms`; partial → cancel remainder.
+- [x] **W4 — real fee/PnL where reliable.** positions parse + ack-fee-when-fill_count-matches; TODO left for RECON.
+
+## INFO — DONE ✅
+- [x] **I1** doc inline. [x] **I2** cycle-level daily-loss gate (account-wide on any breached date).
+- [x] **I3** reuse cycle snapshot. [x] **I4** doc cross-tz bucketing. [x] **I5** untouched. [x] **I6** DST policy.
+
+## Self-review findings (acted on)
+- Flatten SELL was `limit 0` (Kalshi rejects 0; range 1–99) → fixed to `1` (still marketable).
+- Flatten left Book showing phantom-open legs → added `Book.remove_position` so Book matches exchange.
+- I6 prevents the throw but does NOT fix a pre-existing transition-DAY 1-hour drift in the LOG-only
+  `t_utc` (normalize()+Timedelta vs wall-clock); cosmetic, out of scope, not worsened.
+
+## Result: 39 passed (28 original + 11 new). No commit, no deploy.
+
+## API field facts (context7-verified, /openapi/kalshi_openapi_yaml)
+- `/portfolio/positions` MarketPosition: `realized_pnl_dollars`, `fees_paid_dollars` (req, $ strings).
+- CreateOrderResponse: order nested under `order`; `taker_fees_dollars`, `maker_fees_dollars`,
+  `fill_count_fp`, `status` (resting|canceled|executed), `order_id` under `order`.

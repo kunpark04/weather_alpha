@@ -17,13 +17,14 @@ import pandas as pd
 
 from weather_alpha.config import Config, MarketCfg
 from weather_alpha.data import DataBundle, latest_viable_anchor, load_bundle, refresh_live
-from weather_alpha.execution import ExecutionResult, KillSwitchTripped, execute, reconcile_settlements
+from weather_alpha.execution import (
+    ExecutionResult, KillSwitchTripped, check_daily_loss, execute, reconcile_settlements)
 from weather_alpha.features import build_features
 from weather_alpha.kalshi import KalshiClient, event_date_code
 from weather_alpha.live_fetchers import fetch_live_cli
 from weather_alpha.model import ModelArtifacts, Prediction, predict_for_anchor
 from weather_alpha.pmf import INTEGER_F_GRID
-from weather_alpha.positions import Book
+from weather_alpha.positions import Book, RunBudget
 from weather_alpha.report import report, usd
 from weather_alpha.strategy import StrategyOutput, run_strategy, run_wing_strategy
 
@@ -100,13 +101,29 @@ async def run_cycle(
     target_markets = markets if markets is not None else cfg.markets
     # W4: latch any pre-existing drawdown BEFORE trading, so the first city is gated too.
     _latch_halts(cfg, book)
+    # W1: ONE order-attempt budget shared across every market this cycle, so
+    # cfg.risk.per_anchor_max_trades is a true per-CYCLE backstop (sums across cities) rather
+    # than resetting per market. With K=1 this is identical to the old per-market counter.
+    budget = RunBudget(cap=cfg.risk.per_anchor_max_trades)
+    # I2: ONE account-wide realized-daily-loss gate per cycle (was N per-market raises inside
+    # execute(), each keyed to that city's anchor date). A breach gates NEW ORDERS for every city
+    # but settlement + re-sync still run. This makes the account-wide accumulator gate the whole
+    # account on ANY breached date (the intended account-wide semantics) instead of only cities
+    # whose specific anchor date breached; in practice the gate is ~always 0 at decision time
+    # (realized loss accrues only at next-day settlement), so this is a clarity refinement.
+    gated_reason: str | None = None
+    try:
+        check_daily_loss(cfg, book)
+    except KillSwitchTripped as e:
+        gated_reason = str(e)
 
     results: list[CycleResult] = []
     total_realized = 0
     for market in target_markets:
         try:
             r = await _run_one_market(cfg, market, art, book, kalshi,
-                                      bundle=bundle, force_anchor=force_anchor)
+                                      bundle=bundle, force_anchor=force_anchor, budget=budget,
+                                      gated_reason=gated_reason)
         except Exception:
             # Isolate a per-market failure (bad data / parse / network) so one city can
             # never take down the others — critical when a live city shares the process.
@@ -138,6 +155,8 @@ async def _run_one_market(
     *,
     bundle: DataBundle | None,
     force_anchor: pd.Timestamp | None = None,
+    budget: RunBudget | None = None,
+    gated_reason: str | None = None,
 ) -> CycleResult:
     """One city's slice of a cycle: predict → strategize → execute → settle (its station)."""
     if cfg.model.enabled:
@@ -186,18 +205,27 @@ async def _run_one_market(
         strat = _dispatch_strategy(cfg, pred, contracts, feature_row, bankroll)
         _report_decision(tag, strat)
 
-    try:
-        exec_result = await execute(cfg, pred, contracts, strat, book,
-                                    kalshi if cfg.is_live() else None, market=market,
-                                    bankroll_usd=bankroll)
-    except KillSwitchTripped as e:
-        # #5: the kill switch / daily-loss cap blocks NEW ORDERS only — settlement of
-        # prior-day positions (below) and the bankroll re-sync must still run.
+    if gated_reason is not None:
+        # I2: the cycle-level daily-loss gate tripped — block NEW ORDERS for this city, but fall
+        # through to settlement + re-sync below (same contract as the kill-switch gate, #5).
         logger.warning("[%s] execution gated (%s) — no new orders; settlement still runs",
-                       market.name, e)
-        report(f"{tag} ⛔ GATED — {e}; no new orders (settlement still runs)")
+                       market.name, gated_reason)
+        report(f"{tag} ⛔ GATED — {gated_reason}; no new orders (settlement still runs)")
         exec_result = ExecutionResult(fills=0, skipped=0, realized_orders=[],
-                                      diagnostics={"gated": str(e)})
+                                      diagnostics={"gated": gated_reason})
+    else:
+        try:
+            exec_result = await execute(cfg, pred, contracts, strat, book,
+                                        kalshi if cfg.is_live() else None, market=market,
+                                        bankroll_usd=bankroll, budget=budget)
+        except KillSwitchTripped as e:
+            # #5: the kill switch blocks NEW ORDERS only — settlement of prior-day positions
+            # (below) and the bankroll re-sync must still run.
+            logger.warning("[%s] execution gated (%s) — no new orders; settlement still runs",
+                           market.name, e)
+            report(f"{tag} ⛔ GATED — {e}; no new orders (settlement still runs)")
+            exec_result = ExecutionResult(fills=0, skipped=0, realized_orders=[],
+                                          diagnostics={"gated": str(e)})
     _report_fills(tag, exec_result)
 
     # Settlement for THIS market's station only.

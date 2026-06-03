@@ -79,6 +79,11 @@ class KalshiPosition:
     side: str                         # "yes" | "no"
     contracts: int
     avg_price_cents: int
+    # W4: exchange-truth lifetime figures for this market position (cents). Both are REQUIRED
+    # fields on the /portfolio/positions MarketPosition (realized_pnl_dollars, fees_paid_dollars);
+    # default 0 keeps non-API constructors (tests / legacy callers) working.
+    realized_pnl_cents: int = 0
+    fees_paid_cents: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +305,10 @@ def _parse_positions(data: dict[str, Any]) -> list[KalshiPosition]:
     `market_exposure_dollars` (fixed-point dollars). The legacy integer `position` and
     `market_exposure` (cents) were scheduled for removal on 2026-03-12. Prefer the new
     fields and fall back to the legacy pair only when the new ones are absent.
+
+    W4: also surfaces the exchange-truth `realized_pnl_dollars` + `fees_paid_dollars` (both
+    REQUIRED MarketPosition fields) as cents, so a Book↔exchange reconciliation can prefer the
+    real figures over the bot's per-fill fee estimate. Missing → 0 (legacy payload / cents-only).
     """
     out: list[KalshiPosition] = []
     for p in data.get("market_positions", []):
@@ -316,8 +325,30 @@ def _parse_positions(data: dict[str, Any]) -> list[KalshiPosition]:
             side="yes" if qty > 0 else "no",
             contracts=abs(qty),
             avg_price_cents=int(exposure_cents / max(abs(qty), 1)),
+            realized_pnl_cents=int(round(_fp(p.get("realized_pnl_dollars")) * 100)),
+            fees_paid_cents=int(round(_fp(p.get("fees_paid_dollars")) * 100)),
         ))
     return out
+
+
+def order_ack_fee_cents(ack: dict[str, Any]) -> tuple[int | None, int | None]:
+    """W4: the exchange-reported (fee_cents, fill_count) from a place_order CreateOrderResponse.
+
+    The order is nested under `order`; per the verified OpenAPI spec it carries
+    `taker_fees_dollars` + `maker_fees_dollars` (total charged fee = their sum) and
+    `fill_count_fp` (contracts filled at ack time). Returns (None, None) when the ack lacks the
+    fee fields (e.g. a resting order, the mock test client, or a schema we don't recognize) so
+    the caller falls back to the trade_fee_cents estimate. The fill_count lets the caller use
+    the ack fee ONLY when it corresponds to the same quantity the position poll confirmed."""
+    order = ack.get("order") if isinstance(ack.get("order"), dict) else ack
+    taker = order.get("taker_fees_dollars")
+    maker = order.get("maker_fees_dollars")
+    if taker is None and maker is None:
+        return None, None
+    fee_cents = int(round((_fp(taker) + _fp(maker)) * 100))
+    fc = order.get("fill_count_fp")
+    fill_count = int(round(_fp(fc))) if fc is not None else None
+    return fee_cents, fill_count
 
 
 def _spec_from_market(m: dict[str, Any]) -> str:

@@ -43,3 +43,12 @@ data/scheduler_state.json
 data/live/
 data/paper/
 data/orderbook/
+
+# Analysis outputs are derivable from the committed scripts (regenerate, don't version):
+#   data/backfill/  -- raw trade-history zips (39M+, via backfill_cities.py)
+#   data/analysis/  -- coverage/edge datasets + READMEs (via build_analysis_datasets.py)
+data/backfill/
+data/analysis/
+
+# Subagent coordination artifacts (transient)
+tasks/_agent_bus/

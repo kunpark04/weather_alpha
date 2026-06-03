@@ -653,6 +653,38 @@ def test_mid_wing_flatten_failure_keeps_leg_in_book():
     assert r.diagnostics.get("halt_reason") == "leg_error"
 
 
+def test_flatten_sells_full_holding_not_just_cycle_delta():
+    # W-A: on a TOP-UP wing (a prior-cycle holding already exists, this cycle adds more) a mid-wing
+    # error must flatten the FULL exchange holding, not just this cycle's delta fill — else
+    # remove_position (which drops the whole position) leaves the remainder naked on the exchange
+    # while the Book reads flat.
+    cfg = load_config(_write_cfg([_CHI], mode="live"), require_live_creds=False)
+    pred = engine._placeholder_prediction(cfg, pd.Timestamp("2026-06-01"))
+    c1, c2 = _live_contract("KXHIGHCHI-26JUN01-B72.5"), _live_contract("KXHIGHCHI-26JUN01-B74.5")
+    # Prior cycle already bought 3 of leg 1 (in the Book + on the exchange); this cycle tops up to 5.
+    book = Book()
+    book.add_fill(ticker=c1.ticker, side="yes", contracts=3, fill_cents=50, fee_cents=0,
+                  bucket_spec="72-73", opened_utc="2026-06-01T00:00:00+00:00",
+                  anchor_date="2026-06-01", station="KMDW")
+    tg = [TargetPosition(ticker=c1.ticker, side="yes", target_contracts=5, limit_price_cents=50, bucket_spec="72-73"),
+          TargetPosition(ticker=c2.ticker, side="yes", target_contracts=3, limit_price_cents=50, bucket_spec="74-75")]
+
+    class _ErrOnSecond(_MockLiveClient):
+        async def place_order(self, *, ticker, side, action, count, limit_price_cents, client_order_id=None):
+            if action == "buy" and ticker == c2.ticker:
+                raise RuntimeError("simulated rejection on leg 2")
+            return await super().place_order(ticker=ticker, side=side, action=action, count=count,
+                                             limit_price_cents=limit_price_cents, client_order_id=client_order_id)
+
+    # exchange already holds 3 of leg 1; the top-up delta (5-3=2) fills -> exchange + Book reach 5.
+    cli = _ErrOnSecond(held={(c1.ticker, "yes"): (3, 50)}, fills={c1.ticker: 2})
+    r = asyncio.run(execute(cfg, pred, [c1, c2], StrategyOutput(targets=tg, diagnostics={}),
+                            book, cli, market=cfg.markets[0], bankroll_usd=25.0))
+    assert r.diagnostics.get("halt_reason") == "leg_error"
+    assert cli.flatten_sells == [(c1.ticker, "yes", 5)], cli.flatten_sells   # FULL 5, not the delta 2
+    assert book.open_for(c1.ticker, "yes") is None                          # whole position removed
+
+
 def test_live_books_exchange_reported_fee_when_present():
     # W4: when the order ack carries the exchange fee AND its fill_count matches the polled fill,
     # the Book records the EXCHANGE fee, not the formula estimate.
@@ -674,17 +706,25 @@ def test_cycle_level_daily_loss_gate_blocks_orders_but_runs_settlement():
     # for any city) while settlement still runs. Unit-check the gate fn + the run_cycle integration.
     from weather_alpha.execution import check_daily_loss, KillSwitchTripped as _KST
     cfg = load_config(_write_cfg([_CHI, _NYC]))
+    over_cap = -int(cfg.risk.daily_max_loss_usd * 100) - 1
+    recent = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+    old = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
     clean = Book()
     check_daily_loss(cfg, clean)                       # no breach -> no raise
     breached = Book()
-    breached.daily_loss_cents = {"2026-05-30": -int(cfg.risk.daily_max_loss_usd * 100) - 1}  # just past cap
+    breached.daily_loss_cents = {recent: over_cap}     # RECENT breach -> gates
     raised = False
     try:
         check_daily_loss(cfg, breached)
     except _KST:
         raised = True
     assert raised
-    # Integration: run_cycle on a breached book gates every city (diagnostics carry the gate).
+    # I-A: a breach on an OLD date must NOT gate (else a single bad day latches the bot off forever
+    # with no reset path). The 7-day rolling window ages it out.
+    aged = Book()
+    aged.daily_loss_cents = {old: over_cap}
+    check_daily_loss(cfg, aged)                         # no raise -> aged out
+    # Integration: run_cycle on a recently-breached book gates every city (diagnostics carry the gate).
     results = asyncio.run(engine.run_cycle(cfg, None, breached, _MockKalshi()))
     assert results and all(r.execution.diagnostics.get("gated") for r in results), \
         [r.execution.diagnostics for r in results]

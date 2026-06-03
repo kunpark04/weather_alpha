@@ -277,22 +277,29 @@ async def _flatten_legs(cfg: Config, client: KalshiClient | None, book: Book,
                        len(filled))
         return
     for f in filled:
+        # W-A: sell the FULL booked holding (any prior-cycle fills + this one), NOT just this
+        # cycle's delta `f["contracts"]`. `remove_position` below drops the WHOLE position, so a
+        # partial sell would leave the remainder naked on the exchange while the Book reads flat —
+        # the exact tail risk flatten exists to kill. add_fill accumulates, so book.open_for is the
+        # true holding (== exchange truth, since W3 cancels any partial remainder each cycle).
+        pos = book.open_for(f["ticker"], f["side"])
+        qty = pos.contracts if (pos is not None and not pos.settled) else f["contracts"]
         try:
             # Marketable exit: a SELL at limit 1¢ crosses any resting bid and (by price-time
             # priority) fills at the prevailing BID, not at 1¢ — so it exits at market without
             # giving the position away. 1, not 0, because Kalshi prices are 1–99¢ (0 is rejected).
             await client.place_order(
                 ticker=f["ticker"], side=f["side"], action="sell",
-                count=f["contracts"], limit_price_cents=1,
+                count=qty, limit_price_cents=1,
                 client_order_id=f"wa-flat-{f['ticker']}-{f['side']}-{int(pd.Timestamp.now(tz='UTC').timestamp() * 1000)}",
             )
             book.remove_position(f["ticker"], f["side"])   # Book now flat for this leg, like the exchange
             logger.critical("FLATTENED naked leg after mid-wing error: sold %d %s %s (removed from Book)",
-                            f["contracts"], f["side"], f["ticker"])
+                            qty, f["side"], f["ticker"])
         except Exception:
             logger.critical("FAILED to flatten naked leg %s %s x%d after mid-wing error — leg KEPT in "
                             "Book (still held); MANUAL INTERVENTION REQUIRED to square the book",
-                            f["side"], f["ticker"], f["contracts"])
+                            f["side"], f["ticker"], qty)
 
 
 # ---------------------------------------------------------------------------
@@ -459,12 +466,20 @@ def _check_kill_switch(cfg: Config) -> None:
 def check_daily_loss(cfg: Config, book: Book) -> None:
     """I2: ONE account-wide gate on REALIZED daily loss, checked per CYCLE (was N per-market raises).
     daily_loss_cents is a single account-wide accumulator keyed by anchor date; gate the whole
-    cycle if ANY date has breached the cap (the realized loss that breaches it is keyed to the day
-    it settled). W5 note: realized loss accrues only at settlement (next-day for a daily market),
+    cycle if a RECENT date has breached the cap (the realized loss that breaches it is keyed to the
+    day it settled). W5 note: realized loss accrues only at settlement (next-day for a daily market),
     so for the CURRENT anchor this is ~always 0 at decision time — the real same-day stops are the
-    intraday outlay breaker (C3) + the exposure cap (C2). Kept as belt-and-suspenders."""
+    intraday outlay breaker (C3) + the exposure cap (C2). Kept as belt-and-suspenders.
+
+    I-A: only RECENT breached dates gate. daily_loss_cents accumulates per anchor date and is never
+    cleared, so scanning ALL of history would latch the bot off PERMANENTLY (no reset path) on a
+    single old >cap day. A 7-day rolling window self-clears (a fresh breach is ~1 day old since
+    loss lands at T+1), so a bad day stops trading for ~a week rather than forever."""
     cap_cents = -int(round(cfg.risk.daily_max_loss_usd * 100))
+    cutoff = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
     for date_iso, daily in book.daily_loss_cents.items():
+        if date_iso < cutoff:           # I-A: old breaches age out — no permanent latch
+            continue
         if daily <= cap_cents:
             msg = (f"daily loss cap hit for {date_iso}: {daily}¢ <= {cap_cents}¢ "
                    f"(${cfg.risk.daily_max_loss_usd:.2f})")

@@ -380,9 +380,9 @@ async def _execute_one(cfg: Config, c: KalshiContract, tgt: TargetPosition,
         # fill quantity; otherwise fall back to the ceil(7%·N·P·(1−P)) estimate. The ack fee is
         # only trustworthy when the ack's fill_count matches what the position poll confirmed
         # (they can diverge: the ack snapshots fill-at-ack-time, the poll is the settled truth).
-        # TODO(W4): for a definitively exact per-position fee, read fees_paid_dollars from
-        #   GET /portfolio/positions (now surfaced on KalshiPosition.fees_paid_cents) during a
-        #   Book<->exchange reconciliation pass (HANDOFF RECON), rather than the per-order ack.
+        # W4 RECON: this per-order ack fee is the INTERIM per-fill value; engine._reconcile_book_fees
+        #   overwrites it with the exact per-position fees_paid_dollars from GET /portfolio/positions
+        #   at END OF CYCLE (KalshiPosition.fees_paid_cents), so settlement subtracts the exact fee.
         ack_fee, ack_fill = order_ack_fee_cents(ack)
         if ack_fee is not None and ack_fill == filled:
             fee_cents = ack_fee

@@ -149,6 +149,30 @@ class Book:
         self.fees_paid_cents -= p.total_fees_cents
         del self.positions[key]
 
+    def reconcile_fees(self, exchange_positions) -> int:
+        """W4 RECON: overwrite each OPEN position's ESTIMATED total_fees_cents with the exchange-truth
+        fee (`fees_paid_cents`, parsed from /portfolio/positions `fees_paid_dollars`), so the fee that
+        settlement subtracts — and thus the realized PnL feeding the drawdown HWMs — is exact rather
+        than the bot's `ceil(7%·N·P·(1−P))` per-fill estimate. Both are cumulative for the open market
+        position, so a straight overwrite is correct. `exchange_positions` is any iterable of objects
+        with `.ticker` / `.side` / `.fees_paid_cents` (KalshiPosition). A non-positive exchange fee is
+        treated as "no data" and skipped (keeps the estimate) so a legacy/absent field can't zero a
+        real fee. Returns the net cents adjusted to the account-wide `fees_paid_cents` (for logging)."""
+        truth = {(p.ticker, p.side): p.fees_paid_cents for p in exchange_positions}
+        net = 0
+        for pos in self.positions.values():
+            if pos.settled:
+                continue
+            t = truth.get((pos.ticker, pos.side))
+            if t is None or t <= 0:
+                continue
+            delta = t - pos.total_fees_cents
+            if delta:
+                pos.total_fees_cents = t
+                self.fees_paid_cents += delta
+                net += delta
+        return net
+
     # ---- drawdown circuit-breakers ---------------------------------------------
 
     def realized_for_station(self, station: str) -> int:

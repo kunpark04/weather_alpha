@@ -142,6 +142,10 @@ async def run_cycle(
     if total_realized:
         await _resync_bankroll_after_settlement(cfg, book, kalshi)
         _latch_halts(cfg, book)
+    # W4 RECON: replace this cycle's per-fill fee ESTIMATES on still-open positions with the
+    # exchange-truth fees from /portfolio/positions, so when they settle (next cycle) the realized
+    # PnL — and the drawdown HWMs it feeds — is exact. LIVE only; a fetch failure is swallowed.
+    await _reconcile_book_fees(cfg, book, kalshi)
     book.save(cfg.paths.positions_snapshot)
     return results
 
@@ -398,6 +402,21 @@ async def _resync_bankroll_after_settlement(cfg: Config, book: Book, client: Kal
         logger.info("LIVE bankroll re-synced after settlement: $%.2f", bal / 100.0)
     except Exception:
         logger.exception("post-settlement balance refresh failed; keeping prior bankroll")
+
+
+async def _reconcile_book_fees(cfg: Config, book: Book, client: KalshiClient | None) -> None:
+    """W4 RECON: overwrite each open Book position's estimated fee with the exchange-truth
+    fees_paid_dollars from /portfolio/positions (LIVE only; PAPER has no exchange). Runs once at
+    end of cycle after fills. A fetch failure never aborts the cycle — the per-fill estimate stays
+    until next time, and the post-settlement get_balance() re-sync still keeps the cash figure honest."""
+    if not cfg.is_live() or client is None or not book.positions:
+        return
+    try:
+        net = book.reconcile_fees(await client.get_positions())
+        if net:
+            logger.info("W4 RECON: open-position fees reconciled to exchange truth (net %+d¢)", net)
+    except Exception:
+        logger.exception("W4 fee reconciliation failed; keeping per-fill fee estimates")
 
 
 def _latch_halts(cfg: Config, book: Book) -> None:

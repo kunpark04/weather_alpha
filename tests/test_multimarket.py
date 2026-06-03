@@ -701,6 +701,29 @@ def test_live_books_exchange_reported_fee_when_present():
     assert book.fees_paid_cents == 4, book.fees_paid_cents      # exchange 4c, not the 6c estimate
 
 
+def test_w4_recon_overwrites_estimated_fee_with_exchange_truth():
+    # W4 RECON: Book.reconcile_fees overwrites an open position's ESTIMATED fee with the exchange-truth
+    # fees_paid_cents (/portfolio/positions), so settlement later subtracts the exact fee. A non-positive
+    # exchange fee is treated as "no data" and skipped (keeps the estimate).
+    from weather_alpha.kalshi import KalshiPosition
+    book = Book()
+    book.add_fill(ticker="KXHIGHCHI-26JUN01-B72.5", side="yes", contracts=3, fill_cents=50,
+                  fee_cents=6, bucket_spec="72-73", opened_utc="2026-06-01T00:00:00+00:00",
+                  anchor_date="2026-06-01", station="KMDW")
+    assert book.fees_paid_cents == 6                              # bot's ceil(7%) estimate
+    exch = [KalshiPosition(ticker="KXHIGHCHI-26JUN01-B72.5", side="yes", contracts=3,
+                           avg_price_cents=50, realized_pnl_cents=0, fees_paid_cents=4)]
+    net = book.reconcile_fees(exch)                               # exchange truth = 4c
+    assert net == -2 and book.fees_paid_cents == 4               # account total now exact
+    assert book.open_for("KXHIGHCHI-26JUN01-B72.5", "yes").total_fees_cents == 4
+    # a 0 (absent/legacy) exchange fee is ignored -> estimate kept (can't zero a real fee)
+    book2 = Book()
+    book2.add_fill(ticker="X-Y", side="yes", contracts=2, fill_cents=40, fee_cents=5,
+                   bucket_spec="1-2", opened_utc="t", anchor_date="2026-06-01", station="S")
+    book2.reconcile_fees([KalshiPosition(ticker="X-Y", side="yes", contracts=2, avg_price_cents=40)])
+    assert book2.fees_paid_cents == 5                             # unchanged (0 -> skipped)
+
+
 def test_cycle_level_daily_loss_gate_blocks_orders_but_runs_settlement():
     # I2: a breached account-wide daily-loss accumulator gates the WHOLE cycle once (no new orders
     # for any city) while settlement still runs. Unit-check the gate fn + the run_cycle integration.

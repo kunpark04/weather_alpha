@@ -1,12 +1,16 @@
 # systemd --user RESIDENT service: the PAPER multi-market bot. Long-running --loop that fires
-# each city in config/paper.yaml at its own local 1 PM. mode: paper => NO real orders, NO creds.
+# each city in config/paper.yaml at its own local 1 PM. mode: paper => NO real orders.
 # Install to ~/.config/systemd/user/.  Edit paths if your clone is not at ~/weather-alpha.
+# EnvironmentFile (optional, '-' = ok if absent) supplies the Kalshi key used READ-ONLY: it gives the
+# 20-city read path the higher rate-limit tier. SAFE -- paper never calls place_order (guarded by
+# is_live() in execution.py); keyless still works (lower tier) if the file is missing.
 [Unit]
 Description=Weather Alpha - PAPER resident multi-market bot
 
 [Service]
 Type=simple
 WorkingDirectory=%h/weather-alpha
+EnvironmentFile=-%h/weather-alpha/secrets/kalshi-rw.env
 ExecStart=%h/weather-alpha/.venv/bin/python -m weather_alpha --headless --loop --config config/paper.yaml
 Restart=on-failure
 RestartSec=30

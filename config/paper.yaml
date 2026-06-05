@@ -5,10 +5,32 @@
 mode: paper
 
 markets:
-  - {name: HOU, event_pattern: KXHIGHTHOU, station: KHOU, local_tz: America/Chicago}
-  - {name: CHI, event_pattern: KXHIGHCHI,  station: KMDW, local_tz: America/Chicago}   # paper SHADOW of the live Chicago
-  # Append more PAPER cities (any US tz) to widen the test, e.g.:
-  # - {name: NYC, event_pattern: KXHIGHNY,  station: KNYC, local_tz: America/New_York}
+  # All 20 daily-high cities (paper forward-test). {name, event_pattern, station, local_tz}.
+  # tz from the repo (authoritative). station = the NWS site Kalshi settles on. ALL 20 VERIFIED
+  # 2026-06-05 against Kalshi's OWN rules (scripts/verify_stations.py): the newer KXHIGHT* series
+  # name the NWS Climatological Report code in rules_secondary (CLI<xxx> -> K<xxx>, authoritative);
+  # the older KXHIGH* series name the airport in rules_primary. A wrong station would only
+  # mis-settle THAT city's paper PnL, nothing else — but none are wrong.
+  - {name: CHI,  event_pattern: KXHIGHCHI,    station: KMDW, local_tz: America/Chicago}      # confirmed
+  - {name: HOU,  event_pattern: KXHIGHTHOU,   station: KHOU, local_tz: America/Chicago}      # confirmed
+  - {name: NYC,  event_pattern: KXHIGHNY,     station: KNYC, local_tz: America/New_York}     # Central Park
+  - {name: MIA,  event_pattern: KXHIGHMIA,    station: KMIA, local_tz: America/New_York}
+  - {name: AUS,  event_pattern: KXHIGHAUS,    station: KAUS, local_tz: America/Chicago}      # confirmed: rules say "Austin Bergstrom" (KAUS), NOT Camp Mabry/KATT
+  - {name: DEN,  event_pattern: KXHIGHDEN,    station: KDEN, local_tz: America/Denver}
+  - {name: PHIL, event_pattern: KXHIGHPHIL,   station: KPHL, local_tz: America/New_York}
+  - {name: LAX,  event_pattern: KXHIGHLAX,    station: KLAX, local_tz: America/Los_Angeles}
+  - {name: LV,   event_pattern: KXHIGHTLV,    station: KLAS, local_tz: America/Los_Angeles}
+  - {name: NOLA, event_pattern: KXHIGHTNOLA,  station: KMSY, local_tz: America/Chicago}
+  - {name: SEA,  event_pattern: KXHIGHTSEA,   station: KSEA, local_tz: America/Los_Angeles}
+  - {name: SFO,  event_pattern: KXHIGHTSFO,   station: KSFO, local_tz: America/Los_Angeles}
+  - {name: DC,   event_pattern: KXHIGHTDC,    station: KDCA, local_tz: America/New_York}     # Reagan National
+  - {name: ATL,  event_pattern: KXHIGHTATL,   station: KATL, local_tz: America/New_York}
+  - {name: MIN,  event_pattern: KXHIGHTMIN,   station: KMSP, local_tz: America/Chicago}
+  - {name: PHX,  event_pattern: KXHIGHTPHX,   station: KPHX, local_tz: America/Phoenix}      # no DST
+  - {name: BOS,  event_pattern: KXHIGHTBOS,   station: KBOS, local_tz: America/New_York}
+  - {name: DAL,  event_pattern: KXHIGHTDAL,   station: KDFW, local_tz: America/Chicago}      # confirmed: CLIDFW = Dallas/Fort Worth (KDFW), NOT Love Field/KDAL
+  - {name: OKC,  event_pattern: KXHIGHTOKC,   station: KOKC, local_tz: America/Chicago}
+  - {name: SATX, event_pattern: KXHIGHTSATX,  station: KSAT, local_tz: America/Chicago}
 
 paths:
   data_dir: data

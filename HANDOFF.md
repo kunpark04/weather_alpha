@@ -35,6 +35,16 @@ the orderbook zips — see §7 `DEPLOY`.
 > Artifacts at `data/model_v3_artifacts/`. CRPS 1.204 °F; Top-1 bucket 45.8 %;
 > Top-3 (±1 bucket) 87.8 % over 1,966 OOF days (2021-01-01 → 2026-05-21).
 
+> ### MULTI-CITY SCOPE + EXECUTION (2026-06-05)
+> Deep backfill unlocked (Kalshi `/historical/*` tier → **3.4 yr, 20 cities**, ~1,250 days/city for
+> the deep ones). Per-city OOS synthesis: **only Chicago has a durable edge** — every other city's
+> realistic (spread-eaten) edge fails OOS or decayed as the market matured. **Maker execution does
+> NOT rescue it:** posting at the bid fills (38–89%) but is **adversely selected** (winning legs fill
+> less than losing legs in 14/20 cities), so it can't capture the spread — for Chicago maker is
+> strictly worse than taking. PAPER now shadows **all 20** cities, the logger logs **all 20** series
+> (both read-only-authenticated), and all 20 settlement stations are **verified vs Kalshi's own
+> rules**. Details: **§1.6**.
+
 | Item | Value |
 |---|---|
 | Best strategy | `wing` + `drop_lower_ask` (agreement-required) |
@@ -156,6 +166,65 @@ candidate. Established this session:
   refresh/features/predict and use a uniform placeholder PMF; `_dispatch_strategy`
   routes `strategy.name` → `run_wing_strategy`. Replaces the hardcoded `joint_kelly`
   (a known loser). flat-$ + fee-aware added to `run_wing_strategy`.
+
+### 1.6 Multi-city scope + execution study (2026-06-05)
+
+**Deep history unlocked.** Kalshi's live `/markets`+`/trades` are windowed to ~67 days, but the
+keyless **`/historical/*` tier** serves every settled market/trade back to 2021. `scripts/backfill_historical.py`
+pulled the modern 6-bucket era (since 2023-01) for all 20 series into `data/backfill/<SERIES>/<date>.zip`
+— **same schema as the live backfill**, so every existing backtest reads it unchanged. ~1,250 day-zips
+each for the deep cities (Chicago, NYC); 3.4 years total. (Lesson **L11**: the "67-day cap" was a
+property of how WE collected, not of the source.)
+
+**Per-city verdict — only Chicago has a durable edge** (`scripts/per_city_synthesis.py`; 1 PM, top-2
+wing, gate `sum_ask<0.90`, IS/OOS 80/20; edge = coverage−cost−fee, ¢ per $1). The honest column is
+realistic OOS (`rOOS` = pay the next actual trade, out-of-sample):
+
+| Tier | Cities | realistic OOS |
+|---|---|---|
+| **Durable** | **Chicago** (only) — `+5.0¢` rOOS, positive proxy edge in **all 4 years**, deepest sample | ✅ |
+| Optimistic-only | Miami, LA, San Antonio, Seattle, Phoenix, Las Vegas — positive IS, **collapse OOS** | ❌ |
+| Noise (IS<0, OOS>0) | Houston, New Orleans, DC, NYC, Philadelphia — small-OOS-tail, uncorroborated | ⚠️ |
+| Never | Denver, Atlanta, Austin, Dallas, Minneapolis, Boston, OKC, SFO | ❌ |
+
+The edge **decayed** for NYC/Miami/Denver as the market matured (positive 2023 → negative 2025-26);
+Austin/Dallas never had one. Chicago alone is positive every year (`+3.0 / +2.0 / +2.9 / +7.3¢`).
+
+**Maker execution does NOT rescue it** (`scripts/maker_fill_harness.py`). The taker (our limit-at-ask
+order) pays the spread (~1-2¢/leg) — the one lever that could help is resting a bid (maker). The
+backfill carries **`taker_side`** per trade (`yes`=lifted ask, `no`=hit bid), so a maker yes-bid fill
+is simulable on the deep tape: it fills iff a `taker_side=="no"` sell prints at ≤ our bid in the
+post-anchor window. Verdict over real trades (identical wing legs; IS/OOS):
+
+- **Fills happen** — 38% (thin books: Chicago/NYC/Miami) to 89% (liquid: Phoenix/Seattle/Boston).
+- **But they're adversely selected** — the WINNING leg fills less than the LOSING leg in **14/20**
+  cities (Chicago 32% vs 42%; New Orleans 42% vs 74%; Las Vegas 68% vs 90%). The market sells into
+  your bid when the bucket is going against you → you fill losers and miss payoffs, breaking the
+  coverage wing.
+- **For Chicago, maker is strictly worse than taking** (maker-IS `−11.8¢` vs taker `+1.2¢`; the
+  winning leg fills just 32%). The few positive maker-OOS cities (Phoenix/Houston/OKC) are small-OOS
+  mirages (IS doesn't corroborate). The fill model ignores queue/size → it is an **upper bound** on
+  fills; real maker fills are lower and more adverse, so the negative verdict is conservative. (**L15**)
+
+**Forward upgrade path.** `scripts/orderbook_logger.py` now logs **real bid/ask + depth ladders**
+(`yes_book`/`no_book`) for all 20 series, accumulating on the droplet (204 markets/poll, 0 settled-day
+zips yet). Once it has ~weeks of near-anchor depth it can re-test maker fills with real queue/size —
+but it is very unlikely to flip a result this one-sided.
+
+**Settlement stations — all 20 verified vs Kalshi's OWN rules** (`scripts/verify_stations.py`). The
+newer `KXHIGHT*` series name the NWS Climatological Report code in `rules_secondary` (`CLI<xxx>` →
+`K<xxx>`, authoritative); the older `KXHIGH*` series name the airport in `rules_primary`. Both
+previously-flagged cities resolved: **AUS → `KAUS`** (Austin-Bergstrom, not Camp Mabry) and **DAL →
+`KDFW`** (Dallas/Fort Worth, not Love Field); Houston settles on **Hobby `KHOU`**, not Bush. Zero
+config changes — all 20 were already correct.
+
+**Paper expanded to all 20 + read-only auth.** `config/paper.yaml` now lists all 20 cities; the paper
+bot and the logger both authenticate the read-WRITE key used **read-only** (`main.py` authenticates a
+paper read path when `KALSHI_KEY_ID` is in the env — SAFE: paper never calls `place_order`, guarded by
+`is_live()` in `execution.py`; the key only buys the higher Kalshi rate-limit tier). Trade cycles
+iterate markets sequentially (spaced) so they don't 429; the only residual is the startup preflight's
+20-call burst (cosmetic — a try/excepted preview, no trade/data impact). Deploy units carry an optional
+read-only `EnvironmentFile` (`deploy/weather-alpha-paper.service`, `deploy/orderbook-logger-user.service`).
 
 ---
 
@@ -333,7 +402,11 @@ Expected: 22 fires, +$308 PnL, 20/2 W/L. Positions land in `data/prod_backtest_p
 | D2 | **Bot runtime = daily one-shot (systemd timer)** | Scaffolded 2026-05-30: `deploy/weather-alpha.service` (`Type=oneshot`) + `weather-alpha.timer` (`OnCalendar 13:05 America/Chicago`, `Persistent`). One run trades today + settles yesterday + exits. Chosen over always-on `--headless --loop` (kept as the optional "rich" mode for intraday retries / a dashboard host). Creds via systemd `EnvironmentFile` (read-**write** key). Runbook: `deploy/README.md` → "Live bot". |
 | TUI | **⚠️ NEXT SESSION — make the TUI a pure read-only monitor (the one DEFERRED review item)** | Today the TUI is **not** passive: its 60s tick uses the old single-market `Scheduler` to run `run_cycle` and place orders (a duplicate driver). This is the single deferred finding from the 2026-06-01 engine review (**REVIEW**). Refactor: strip the scheduler/order path; read **account-truth P/L from Kalshi `/portfolio`** — `balance`, `portfolio_value` (live mark), per-market `realized_pnl_dollars` + `fees_paid_dollars`, and **unrealized = `portfolio_value − Σ market_exposure`** (no labeled field; `/portfolio/positions` is per-market AND per-event). Poll ~1 min, decoupled from the Book, **read-only** key. (`KalshiClient` now reads the fixed-point `position_fp`/`market_exposure_dollars`/`balance_dollars` fields with a legacy fallback — see **AUTH** — but `KalshiPosition` still exposes only contracts + avg price; for the monitor, extend it to also carry `realized_pnl_dollars`/`fees_paid_dollars`.) |
 | RECON | **⚠️ NEXT SESSION — Book↔exchange reconciliation (its own unit)** | `reconcile_with_exchange(cfg, book, client)` at activation + live cycle-start: correct known positions to the exchange qty; **adopt** unknown exchange positions (enrich `bucket_spec` via `fetch_event`, `anchor_date` via the ticker pattern, fee estimated); leave Book-only positions for the CLI settlement path. Closes the C1/W5 tail (an unbooked mid-exception fill) and stops the delta logic from over-buying. Needs a live authenticated account + its own mock-client tests. Tracked as task #20. |
-| P2 | **Liquidity verification** | **Volume half ✅ ample (2026-06-02)** — trade-tape check (`scripts/liquidity_check.py` on `kalshi_history.parquet`, 446K prints / 67 events): in the 0–60 min post-anchor window, mid-priced buckets carry a **median ~1,507 contracts/leg** (min ≥4) vs the wing's ~2/leg need — 100% of legs clear it, and the whole leg order is smaller than one median trade print (5 contracts). Fill-by-volume is a non-issue at $2.50; the 1–2 PM window holds ~6.5% of daily volume. **Price/depth half still open (needs ladders, not trades):** ~19% of days (13/67) had no mid-bucket trade *printed* in the exact window (trade-absence ≠ quote-absence — the bot is a taker hitting a resting ask), and the **`mid+1¢` fill PRICE is unvalidated** since the trade tape has no resting bid/ask. Re-run a depth-based check once `scripts/orderbook_logger.py` has ~2 weeks of near-anchor depth ladders (`DEPLOY`). |
+| P2 | **Liquidity verification** | **Volume half ✅ ample (2026-06-02)** — trade-tape check (`scripts/liquidity_check.py` on `kalshi_history.parquet`, 446K prints / 67 events): in the 0–60 min post-anchor window, mid-priced buckets carry a **median ~1,507 contracts/leg** (min ≥4) vs the wing's ~2/leg need — 100% of legs clear it, and the whole leg order is smaller than one median trade print (5 contracts). Fill-by-volume is a non-issue at $2.50; the 1–2 PM window holds ~6.5% of daily volume. **Price/depth half still open (needs ladders, not trades):** ~19% of days (13/67) had no mid-bucket trade *printed* in the exact window (trade-absence ≠ quote-absence — the bot is a taker hitting a resting ask), and the **`mid+1¢` fill PRICE is unvalidated** since the trade tape has no resting bid/ask. Re-run a depth-based check once `scripts/orderbook_logger.py` has ~2 weeks of near-anchor depth ladders (`DEPLOY`). **Update 2026-06-05:** maker-fill feasibility now tested on the deep tape via `taker_side` (`scripts/maker_fill_harness.py`, §1.6) — posting at the bid fills but is adversely selected, so the limit-at-ask **taker** path stays; the forward depth ladders (logger now on all 20) refine the fill-PRICE once ~weeks deep. |
+| EDGE | **Multi-city edge map (deep history)** | ✅ 2026-06-05 — `/historical/*` backfill (3.4 yr × 20 cities, `scripts/backfill_historical.py`) + per-city OOS synthesis (`scripts/per_city_synthesis.py`): **only Chicago durable**; others collapse OOS or decayed as the market matured. §1.6. |
+| MAKER | **Maker-execution feasibility (the spread lever)** | ✅ TESTED + CLOSED 2026-06-05 — `scripts/maker_fill_harness.py` on the deep tape (`taker_side`): posting at the bid fills (38–89%) but is **adversely selected** (winning legs fill less than losing in 14/20; Chicago maker strictly worse than taker). Doesn't open the 19 or fatten Chicago. Forward depth ladders (logger, all 20) will refine. §1.6 / **L15**. |
+| STATIONS | **Settlement-station verification (all 20)** | ✅ 2026-06-05 — `scripts/verify_stations.py` vs Kalshi `rules_primary`/`rules_secondary` (the `CLI<xxx>` code): all 20 correct, **0 changes**; AUS=`KAUS` (Bergstrom not Mabry), DAL=`KDFW` (not Love Field), HOU=`KHOU` (Hobby not Bush). §1.6. |
+| PAPER20 | **Paper expanded to all 20 + read-only auth** | ✅ 2026-06-05 — `config/paper.yaml` = 20 cities; paper bot + logger authenticate the RW key **read-only** (`main.py` paper read-auth — SAFE: paper never places orders; logger keyless→auth, now logs all 20 series / 204 mkts per poll). Cycles iterate markets sequentially (no 429); only the startup preflight's 20-call burst 429s (cosmetic). Deploy units updated (`deploy/weather-alpha-paper.service`, `deploy/orderbook-logger-user.service`). §1.6. |
 | ~~P3~~ | ~~Same-day live anchor~~ | **OBSOLETE for production** — market_wing is model-free (§1.5), so no same-day weather feed is needed. (Free real-time sources verified anyway: NWS `metar_substitute` / AviationWeather are token-free; precision = the hourly METAR T-group.) |
 | P4 | **Tail-risk** | Largely addressed by flat-$ sizing (no over-bet); the 04-16-type tail is now capped at the flat stake. |
 | P5 | **Expose flat-$ in the backtest harness** | The +$7.98/$25 production figure uses flat-$ + fee-aware sizing that lives only in `run_wing_strategy` / engine config — `backtest_strategy.py` has no `--wing-flat-usd` / `--wing-fee-aware` flag, so the headline number was an inline analysis. Add the flags so it reproduces from one command. |
@@ -373,6 +446,10 @@ HAS_HARD_FLOOR        = True (v3 only)
 | `data/model_v3_artifacts/target_df.parquet` | `cli_high` per date | |
 | `data/model_v3_artifacts/final_models.joblib` | Deployable ensemble | last trained 2026-05-23 |
 | `data/live_log.parquet` | Per-contract prediction log (paper-mode) | growing |
+| `data/backfill/<SERIES>/<date>.zip` | Deep trade tape, 20 cities (`backfill_historical.py`) — `taker_side` per trade enables the maker-fill sim (§1.6) | 2023-01-01 → present (~1,250 days/deep city) |
+| `data/orderbook/<SERIES>/<date>/*.jsonl` → `.zip` on settle | Forward bid/ask + depth ladders (`yes_book`/`no_book`), all 20 series (`orderbook_logger.py`) | 2026-06 → growing |
+
+> `data/backfill/` and `data/orderbook/` are **gitignored** (derivable / runtime) — regenerate via the scripts above; they are not versioned.
 
 ### 9.2 Cached backtest results
 

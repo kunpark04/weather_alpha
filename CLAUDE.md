@@ -19,10 +19,13 @@ retained for the model-enabled path but is **not** used by the production strate
 **Mode is per-process** (one LIVE process, one PAPER process — never mixed in a Book). Live
 is wired + the authenticated read path is validated, but the first live order/fill is still
 unexercised until it fires at the next 1 PM CT anchor. **Live since 2026-06-02:** a LIVE bot
-(Chicago) + a PAPER bot (CHI+HOU shadow) + orderbook logger run 24/7 on a DigitalOcean droplet
+(Chicago) + a PAPER bot + orderbook logger run 24/7 on a DigitalOcean droplet
 (`systemd --user`), with a daily local pull of the orderbook zips; the LIVE bot is armed and
-adopted the real $23.56 balance. See
-[`HANDOFF.md`](HANDOFF.md) §1.5, §7 (`DEPLOY`/`L2`).
+adopted the real $23.56 balance. **As of 2026-06-05** the PAPER bot shadows **all 20 cities** and
+the logger logs **all 20 series** (both authenticate the RW key *read-only*; paper still places no
+real orders). A deep-history study (`/historical/*`, 3.4 yr × 20 cities) found **only Chicago has a
+durable edge** and **maker execution doesn't help** (adverse selection). See
+[`HANDOFF.md`](HANDOFF.md) §1.5, §1.6, §7 (`DEPLOY`/`L2`).
 
 ---
 
@@ -156,6 +159,13 @@ the *same* city is fine (paper places no real orders); never run two LIVE shapes
     skips `load_bundle`, and settlement pulls only the CLI high on demand via
     `engine.settle_if_due` (prior-day trigger). Don't re-couple the model-free path to
     METAR/TAF/ASOS/HRRR, `herbie`, `load_bundle`, or model artifacts.
+13. **Maker execution is adversely selected here — posting at the bid is NOT free spread.** A
+    resting bid fills only when the market sells into it, which happens disproportionately when the
+    bucket is turning into a loser (winning legs fill *less* than losing legs in 14/20 cities;
+    Chicago 32% vs 42%). The production path is a **limit-at-ask taker** on purpose; don't "save the
+    spread" with a maker leg without re-checking outcome-split fill rates. Tested 2026-06-05 on the
+    deep tape via `taker_side` (`scripts/maker_fill_harness.py`; [`HANDOFF.md`](HANDOFF.md) §1.6;
+    `tasks/lessons.md` L15).
 
 ---
 

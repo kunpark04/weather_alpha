@@ -61,9 +61,47 @@ UA = {"User-Agent": "weather-alpha-orderbook-logger/1.0", "Accept": "application
 log = logging.getLogger("orderbook_logger")
 _STOP = False
 
+# --- optional authenticated reads (higher Kalshi rate-limit tier than the keyless public API) ---
+# If KALSHI_KEY_ID + KALSHI_PRIVATE_KEY_PATH are in the env, sign each GET (RSA-PSS); else stay keyless.
+# A read-WRITE key works here perfectly read-only -- the logger only ever GETs, it never writes.
+_KID = ""
+_KEY = None
+
+
+def _load_key() -> None:
+    global _KID, _KEY
+    kid = os.environ.get("KALSHI_KEY_ID", "").strip()
+    kpath = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "").strip()
+    if not (kid and kpath and Path(kpath).exists()):
+        log.info("orderbook logger: keyless public API (set KALSHI_KEY_ID + KALSHI_PRIVATE_KEY_PATH for the auth tier)")
+        return
+    try:
+        from cryptography.hazmat.primitives import serialization
+        _KEY = serialization.load_pem_private_key(Path(kpath).read_bytes(), password=None)
+        _KID = kid
+        log.info("orderbook logger: AUTHENTICATED reads (key %s...) -- higher rate limit", kid[:6])
+    except Exception as e:  # noqa: BLE001 -- keyless still works, just a lower limit
+        log.warning("key load failed (%s); using keyless public API", e)
+
+
+def _auth_headers(method: str, path: str) -> dict:
+    if _KEY is None:
+        return {}
+    import base64
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    ts = str(int(time.time() * 1000))
+    sig = base64.b64encode(_KEY.sign(
+        f"{ts}{method}{path}".encode(),
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+        hashes.SHA256())).decode()
+    return {"KALSHI-ACCESS-KEY": _KID, "KALSHI-ACCESS-SIGNATURE": sig, "KALSHI-ACCESS-TIMESTAMP": ts}
+
 
 def _http_json(url: str, timeout: float = 20.0) -> dict:
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
+    from urllib.parse import urlsplit
+    headers = {**UA, **_auth_headers("GET", urlsplit(url).path)}   # sign path only (no query), per Kalshi
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -187,6 +225,7 @@ def main(argv=None) -> int:
     ap.add_argument("--once", action="store_true", help="single cycle then exit (test)")
     args = ap.parse_args(argv)
     SERIES = [s.strip() for s in args.series.split(",") if s.strip()]
+    _load_key()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     signal.signal(signal.SIGINT, _handle_stop)

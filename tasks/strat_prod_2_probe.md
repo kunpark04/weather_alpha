@@ -49,6 +49,24 @@ not just N=1 — re-validating CLAUDE.md #2 (the market is forward-looking and p
 **Repointed (2026-06-08):** test **batches of NEW model-free ideas** via
 `scripts/idea_batch_screen.py` — screen many market-data-only hypotheses on the deep tape
 (`load_city`, 3.4 yr × 20 cities) with IS/OOS + placebo discipline, respecting the graveyard
-(CLAUDE.md §4/§6). Untested-but-adjacent leads noted here: the **long-confirm** side of the ratchet
-(buy the settling-in bucket if the book lags the lock-in — only the short side was tested), and
-**favorite-longshot calibration** (price-band mispricing across the deep tape).
+(CLAUDE.md §4/§6). An inventory of the ~60 existing scripts confirmed which axes are already covered
+(sum-gate sweeps, sizing-by-sum, anchor-hour grids, seasonality-by-month, maker) — batch #1 targets
+genuine gaps.
+
+### Repoint batch #1 — model-free screens (2026-06-08) · NO new edge
+
+- **A. Favorite-longshot calibration** (realized win rate vs market-implied last-trade price, per
+  contract, 45k obs): market well-calibrated at low/mid prices (|gap| ≤ 1.3¢ for 0–45¢). **Favorites
+  mildly OVERpriced** — 45–85¢ gap −2 to −4.4¢ IS, persisting OOS ~−1 to −2.8¢; extreme favorites
+  (85–100¢) overpriced IS (−6.5¢) but **does NOT persist OOS** (+0.2). Every persistent gap is ≤ the
+  spread+fee (~2–3¢) → not tradeable as a taker, and maker is dead ([[L15]]). Real tilt, sub-cost.
+- **B. Day-of-week** (Chicago wing edge by weekday): **noise** — IS and OOS weekday rankings are
+  uncorrelated (IS best Fri/Sat +5–6¢; OOS best Wed/Mon +16–19¢ on ~16-fire cells). No stable effect.
+- **C. Interior-vs-tail wing** (legs both interior vs touching a tail): **no differentiation** — both
+  ~+5¢ OOS at ~80% WR (the IS +8.6¢ tail edge evaporates OOS). Wing edge is uniform across composition.
+
+**Batch #1 verdict:** no cost-surviving, OOS-robust model-free edge on these axes — the market is
+efficient here (consistent with the project prior; re-validates CLAUDE.md #2). Only real structural
+finding: a sub-cost favorite-overpricing tilt (45–85¢). Untested leads for **batch #2**: cross-city
+modal agreement (spatial-synchrony gate) and the **long-confirm** side of the ratchet (buy the
+settling-in bucket if the book lags the lock-in — only the short side was tested).

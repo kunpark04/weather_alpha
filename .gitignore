@@ -43,6 +43,8 @@ data/scheduler_state.json
 data/live/
 data/paper/
 data/orderbook/
+data/state_inbox/
+data/state_archive/
 
 # Analysis outputs are derivable from the committed scripts (regenerate, don't version):
 #   data/backfill/  -- raw trade-history zips (via backfill_cities.py / backfill_historical.py)

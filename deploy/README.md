@@ -94,6 +94,61 @@ Drop `OB_MOVE` to fall back to copy-mode (host keeps every zip). In copy-mode, i
 disk later gets tight, prune already-pulled zips on the host with e.g.
 `find ~/projects/weather-alpha/data/orderbook -name '*.zip' -mtime +30 -delete`.
 
+## Pull bot state — live_log history + positions snapshot (scheduled)
+The forward-edge tracker (`scripts/forward_edge_tracker.py`, HANDOFF §1.7) reads
+`data/live_log.parquet`. The bot writes that — and its Book `data/positions.json` — on the **droplet**,
+so pull them down like the zips. `scripts/pull-state.ps1` (+ `scripts/merge_state.py`) handles the two
+files' DIFFERENT natures safely (they are **not** inert settled archives like the zips):
+
+- **`live_log.parquet`** is append-only and always-growing → the pull **rotates** it (atomic `mv` to a
+  dated shard on the droplet; the bot recreates a fresh log on its next append, race-free), pulls the
+  shard, byte-verifies it locally, then **deletes the shard from the droplet** — so the history lives
+  **only** on local. `merge_state.py` folds shards into the canonical `data/live_log.parquet` (dedup by
+  `run_utc,t_utc,ticker,mode`) and moves consumed shards to `data/state_archive/`.
+- **`positions.json`** is the LIVE Book the running bot reads at startup → it is **COPIED** down
+  (overwriting the local snapshot) and **left on the droplet**. Deleting the running bot's Book would
+  break settlement / risk re-buys; it is tiny and bounded, so it stays. (This is the one deliberate
+  exception to "delete the remote copy.")
+
+Verification-before-delete: a shard is removed from the droplet only after its byte size is confirmed
+locally, so a failed/partial pull never deletes the only copy.
+
+**Closed-laptop safe.** A sleeping laptop can't *receive* data, so the droplet is the buffer: while the
+laptop is closed the log keeps growing and the Book stays current; nothing is deleted until it is
+verified locally. Register the task with `-StartWhenAvailable` so a run missed during sleep fires on the
+next wake and catches up — no data lost over any closure length. (To also *wake* the box on schedule,
+add `-WakeToRun` to the settings + enable wake timers in the power plan; usually unnecessary, since
+catch-up-on-wake covers it.)
+
+Prereq: the same passwordless SSH key the zip pull uses. Host via `WA_HOST` (falls back to `OB_HOST`);
+`WA_REMOTE_PROJ` defaults to `projects/weather-alpha`, `WA_LOCAL_DATA` to the repo's `data/`.
+
+```powershell
+$env:WA_HOST = 'fa@137.184.128.37'
+pwsh -NoProfile -File scripts\pull-state.ps1            # test once (rotates+pulls, merges into data\)
+# then a daily Scheduled Task. GOTCHAS (both bite): Task Scheduler can't resolve a bare 'pwsh.exe'
+# (-> 0x80070002 FILE_NOT_FOUND), and the WindowsApps *versioned* path changes on every PS update --
+# so use the STABLE app-alias path. Persist WA_HOST/WA_PYTHON at User scope so the unattended run
+# inherits them (the task won't see your interactive shell's env or PATH).
+$pwsh = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'   # stable across PS updates (Store install)
+if (-not (Test-Path $pwsh)) { $pwsh = (Get-Command pwsh).Source }      # MSI-install fallback (C:\Program Files\PowerShell\7)
+$ps1  = (Resolve-Path scripts\pull-state.ps1).Path
+$repo = (Resolve-Path .).Path
+[Environment]::SetEnvironmentVariable('WA_HOST','fa@137.184.128.37','User')
+[Environment]::SetEnvironmentVariable('WA_PYTHON',(Get-Command python).Source,'User')
+$act = New-ScheduledTaskAction  -Execute $pwsh -Argument "-NoProfile -File `"$ps1`"" -WorkingDirectory $repo
+$trg = New-ScheduledTaskTrigger -Daily -At 8:10am
+# Laptop-friendly: wake to run; catch up on next wake if it was off/hibernated; don't skip on battery.
+$set = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName 'PullBotState' -Action $act -Trigger $trg -Settings $set -Force
+# verify: Get-ScheduledTaskInfo -TaskName PullBotState  ->  LastTaskResult 0 = success
+```
+
+After it runs, score the forward edge: `python scripts/forward_edge_tracker.py` (the `FWD-TRACK`
+rollup; HANDOFF §1.7 / §7). Forward fires are **captured** immediately; they **score** once their
+settled day lands in the backfill tape (`scripts/backfill_historical.py KXHIGHCHI`) — until then the
+tracker lists them as "open (awaiting truth)".
+
 ## Windows (if you must)
 A Windows laptop still won't survive shutdown. If you have an always-on Windows box,
 use Task Scheduler ("run whether logged on or not" + "restart on failure") or NSSM to

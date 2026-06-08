@@ -5,6 +5,93 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L18 — Filter a multi-entity log by entity before per-entity analysis; and INVESTIGATE an anomalous validation number, don't rationalize it
+
+**Context.** Built `scripts/forward_edge_tracker.py` to score forward Chicago fires from the resident
+bot's `live_log.parquet`. The resident PAPER bot logs **all 20 cities** to one log, but `_fires()`
+filtered by mode + date only — **not by series** — so it lumped every city's filled legs into each
+"fire" and matched them against Chicago's settled winner. Result when truth finally landed: 0% win
+rate, breakeven WR **290%**, edge **−290¢/$payout** (impossible — a coverage bet can't lose >100¢ per
+$1 payout), and a Chicago-only realized of **−$19.99** that contradicted the bot's whole-book −$4.99.
+The fix was one line: `df[df.ticker.str.startswith(f"{series}-")]`. Truth after the fix: Chicago has
+fired **0** times forward (paper all `no_target`, live gated) — the "4 fires" I'd reported were
+entirely other cities.
+
+**The worse mistake: I had already SEEN the bug and explained it away.** The earlier smoke test
+(`--since 2026-05-01`) printed "1 fire, −$222.81, 12,499 contracts" and I called it "the pre-production
+test fills, exactly the stale data I'm validating against" — a rationalization. A 12,499-contract,
+−$222 "fire" on a flat-$2.50 strategy was nonsensical and was the **same multi-city bug**; I shipped
+the script and updated docs on the back of a validation run whose output I had hand-waved.
+
+**Rules.**
+- **Any per-entity metric computed from a shared multi-entity log/table must filter to that entity
+  FIRST.** When a file aggregates many keys (cities, accounts, symbols), the entity filter is part of
+  correctness, not a nicety — state the key and assert it (here: ticker prefix == series).
+- **An impossible number is a bug signal, not a data quirk — stop and trace it.** Breakeven WR >100%,
+  edge worse than the max possible loss, a per-slice total exceeding the whole — these are structurally
+  impossible, so the code is wrong. Never explain an impossible value as "weird input."
+- **Don't certify a tool on a validation run you had to rationalize.** If the smoke-test output needs a
+  hand-wave ("that's just test data"), the smoke test FAILED — investigate until the number is
+  explained by the data, or the tool isn't validated. (Echoes [[L10]]/[[L14]]: bound/trust numbers
+  against what's structurally possible; here, a sane-range check would have caught it immediately.)
+- **Validate a multi-entity reader on ≥2 entities, like a parser ([[L5]]).** One-city output can look
+  plausible; the cross-entity contamination only shows when a second entity's rows are present.
+
+**Why it matters.** I reported "4 Chicago forward fires, −$4.99" to the user as fact; the truth was
+N=0 for Chicago. A confidently-wrong forward number is exactly what would corrupt the
+accumulate-to-significance decision the tracker exists to support. The impossible 290% breakeven was a
+free tell I'd have caught by sanity-checking the range before reporting.
+
+---
+
+## L17 — "Survives fees" ≠ "confirmed edge": replay the EXACT config net of the REAL fee in DOLLARS, then discount a max-selected, single-regime OOS for multiplicity + regime before calling it real
+
+**Context.** Asked whether the production edge survives the real Kalshi fee, I replayed the exact
+production config (`scripts/chicago_oos_netfee.py`) with the real `ceil()` fee — the §1.6 `+5.0¢`
+Chicago headline (`per_city_synthesis.py`) had used a **continuous fee proxy** (`0.07·a·(1−a)`) in
+**normalized ¢/$payout**. The fee question had a clean answer (edge survives: realistic OOS
+`+5.0 → +4.6¢`, ~8% drag), but the result was THREE optimisms stacked, only one of which was the fee.
+
+**The three stacked optimisms (each a different way to over-claim an edge).**
+1. **Continuous fee < real ceil fee.** The ceil rounds each per-leg fee UP; at ~2–3 contracts/leg that
+   is ~0.4–0.5¢/$payout the proxy omitted. Cost the strategy with the SAME fee fn the live path calls
+   (`weather_alpha.fees.trade_fee_cents`), never a smooth approximation.
+2. **Normalized ¢/$payout hides the dollar magnitude.** +4.6¢/$payout is a healthy *normalized* edge
+   but only **+$16/yr** on flat $2.50. Report BOTH the normalized edge (comparability) AND the actual
+   dollars (the "is this worth it" decision) — a normalized number alone launders lunch money as a
+   strong edge.
+3. **A max-selected, single-regime OOS is not a confirmed OOS.** Chicago is the WINNER of 20 cities
+   scored on the same tape (§1.6) → its OOS look is multiplicity-inflated; and its OOS window is
+   *entirely* the recent dense-liquidity regime (realistic fill 22→33→98→100% by year), so realistic≈
+   proxy OOS holds only because adverse selection recently vanished — through-cycle edge is ~+2.5¢, not
+   +5¢. Honest verdict: "positive, borderline (binomial p=0.11, bootstrap P(≤0)≈0.05), recent-regime,"
+   not "confirmed."
+
+**Rules.**
+- **To kill or confirm an after-cost edge, replay the EXACT production fn with the EXACT live fee, in
+  dollars** — not a normalized proxy. State the dollar magnitude alongside the normalized one.
+- **Run the structurally-correct significance test, not just a t-stat.** For a high-WR coverage
+  (favorite-longshot) bet the test is WR vs the per-day breakeven (binomial / Clopper–Pearson),
+  reported next to the dollar t-test and a bootstrap CI. "Positive point estimate" ≠ "significant."
+- **Discount a selected estimate for HOW it was selected.** If the city/param was the max of N on the
+  same data, the OOS p is multiplicity-inflated; if the OOS window is one regime (liquidity, season),
+  the edge may be regime-bound, not forward. Name both discounts explicitly.
+- **Answer the asked question AND surface the one that actually binds.** The fee question was a clean
+  YES; the binding uncertainty was significance + selection + regime. Don't let a tidy answer to the
+  asked question imply the decision is settled.
+- **Check the headline's own caveat before quoting it.** `per_city_synthesis`'s docstring already said
+  the continuous fee made its edges "a touch optimistic" — the proxy flagged its own optimism; read it
+  before quoting +5.0¢ as if it were the live-realizable number.
+
+**Why it matters.** "+5.0¢ realistic OOS, only Chicago durable" reads as a confirmed, ship-it edge; the
+honest version ("survives fees, but +$16/yr, p≈0.11, selection- and regime-contaminated → needs genuine
+forward data") drives the opposite call: don't scale, don't fund, accumulate forward fills first.
+Extends [[L12]] (OOS-first; bigger sample is still in-sample), [[L14]] (separate backtest OUTPUT from
+input skepticism — here the inputs were the fee model + the selection), and [[L10]] (bound the noise
+before reporting a delta).
+
+---
+
 ## L16 — Harden EVERY external-call path, not just the obvious one; and a doc that says "spaced/retried" must point at code that does it (recurrence of L4)
 
 **Context.** The user asked whether the live/paper bots had traded and whether there was an

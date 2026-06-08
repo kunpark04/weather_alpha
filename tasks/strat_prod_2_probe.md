@@ -67,6 +67,26 @@ genuine gaps.
 
 **Batch #1 verdict:** no cost-surviving, OOS-robust model-free edge on these axes — the market is
 efficient here (consistent with the project prior; re-validates CLAUDE.md #2). Only real structural
-finding: a sub-cost favorite-overpricing tilt (45–85¢). Untested leads for **batch #2**: cross-city
-modal agreement (spatial-synchrony gate) and the **long-confirm** side of the ratchet (buy the
-settling-in bucket if the book lags the lock-in — only the short side was tested).
+finding: a sub-cost favorite-overpricing tilt (45–85¢).
+
+### Repoint batch #2 — model-free screens (2026-06-08) · NO new edge
+
+`scripts/idea_batch2_screen.py` (reuses batch-#1 helpers), deep tape, IS/OOS 80/20.
+
+- **D. Cross-city confidence synchrony** (Chicago wing edge by the other 19 cities' mean modal
+  confidence, terciles): high-synchrony days lift Chicago WR (86% vs 77% low) but edge is **≈ baseline**
+  (high-tercile OOS +5.4¢ vs the wing's ~+5¢), the IS/OOS tercile rankings **disagree** (IS best=high,
+  OOS best=low), and the signal is redundant with Chicago's own confidence (the existing sum-gate
+  already captures "confident days"). Not an additive spatial edge; gating cuts fires to ⅓ for no lift.
+- **E. Long-confirm** (back the single market-modal bucket by anchor hour 11–16): **−EV at every hour**,
+  IS and OOS. Win% climbs 55→82% as the running max locks in (real info), but the ask climbs faster
+  (0.60→0.80) — you pay up for the certainty (favorites overpriced, batch-#1 A). The slight late-hour
+  rise toward 0 is a stale-price artifact ([[L14]]) and is negative OOS. The ratchet LONG side is as
+  dead as the short side.
+
+**Combined batches #1+#2 — 5/5 model-free ideas dead** (calibration, day-of-week, interior/tail,
+cross-city synchrony, long-confirm). The model-free edge space around the production wing is
+**efficient**; no easy refinement or new market-data-only edge exists. The Chicago coverage wing
+(~+4.6¢ realistic OOS, borderline) remains the only edge. Re-validates CLAUDE.md #2 repeatedly.
+Recommendation: pause model-free probing (diminishing returns); the highest-value work is confirming
+the production wing FORWARD (the `FWD-TRACK` tracker), not mining more market-data-only variants.

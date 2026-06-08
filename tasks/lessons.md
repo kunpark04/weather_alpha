@@ -5,6 +5,29 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L21 — Never call a dir "empty"/redundant from a partial filter; enumerate ALL of it before a destructive op
+
+**Context.** Verifying the relocated droplet's local pull dirs, I counted only `*.zip` in
+`weather-alpha\data\orderbook`, got 0, reported it an "empty leftover", and proposed deleting it — the
+user said "yes" on that basis. The dir actually held **88.5 MB of raw `.jsonl`** depth (KXHIGHCHI,
+6/1–6/6). The delete didn't fire only because I'd gated it on a full recursive `-Force` enumeration
+(`if count==0`), not the zip count; that guard surfaced the contradiction, I re-checked (the days were
+all redundant with the external zip store), re-surfaced to the user, and got fresh confirmation before
+removing.
+
+**Rule.** Don't characterize a directory/dataset as empty / complete / redundant from a **filtered**
+view (`-Filter *.zip`, one glob, one extension). Before any destructive action enumerate **all** contents
+recursively incl. hidden (`Get-ChildItem -Recurse -Force`), check total size, and confirm the data exists
+elsewhere. Pair the destructive call with a guard that **fails closed** (delete only inside an
+`if (count==0)` branch, not unconditionally). If a prior claim proves wrong, STOP — a "yes" given on a
+false premise ("an empty dir") does not authorize deleting real bytes; re-surface and re-confirm.
+
+**Why it matters.** Counting one extension and calling the rest "nothing" is exactly how live data gets
+deleted under a stale authorization. A full enumeration costs milliseconds; a wrong "empty" costs
+unrecoverable bytes. Sibling of the "look at the target before deleting" rule.
+
+---
+
 ## L20 — The droplet carries a sparse + partial checkout, NEVER the full repo
 
 **Context.** After flattening the droplet (user `fa` → `weather-alpha`, home = project; the project was

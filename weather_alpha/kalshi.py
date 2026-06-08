@@ -124,8 +124,8 @@ _ORDER_RATE_BACKOFF_S = 0.5
 # at a 0.5 s stagger because the logger saturates the tier). Retry honoring the Retry-After header
 # (else exponential backoff), then give up so a persistent failure still surfaces. GETs are idempotent,
 # so a retry can never double-anything.
-_READ_RETRIES = 4
-_READ_BACKOFF_S = 0.5
+_READ_RETRIES = 6              # ~9.5 s total window (0.5+1+2+3+3) — empirically 4 left 2/20 preflight
+_READ_BACKOFF_S = 0.5          # reads still 429'ing under logger contention; 6 rides out the gaps
 _READ_BACKOFF_CAP_S = 3.0
 
 

@@ -890,7 +890,8 @@ def test_fetch_event_raises_after_persistent_429():
         assert False, "expected HTTPStatusError after exhausting retries"
     except httpx.HTTPStatusError:
         pass
-    assert cli._http.calls == 4                       # _READ_RETRIES attempts, then raise
+    from weather_alpha.kalshi import _READ_RETRIES
+    assert cli._http.calls == _READ_RETRIES           # exhausts the retry budget, then raises
 
 
 def test_cycle_level_daily_loss_gate_blocks_orders_but_runs_settlement():

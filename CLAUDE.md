@@ -250,9 +250,14 @@ Every md file that governs how this project is worked on:
 | [`tasks/multimarket_refactor_plan.md`](tasks/multimarket_refactor_plan.md) | Multi-market refactor design + locked decisions (markets list, shared Book, per-tz scheduler, drawdown halts) |
 | [`tasks/engine_code_review_2026-06-01.md`](tasks/engine_code_review_2026-06-01.md) | Adversarial engine review (2 CRITICAL · 7 WARN · 8 INFO + follow-up) with a Resolution section — all fixed; TUI read-only conversion deferred |
 | [`tasks/lessons.md`](tasks/lessons.md) | Self-improvement log — recurring-mistake patterns + prevention rules |
+| [`tasks/strat_prod_2_probe.md`](tasks/strat_prod_2_probe.md) | `strat_prod_2` model-free probe log — MM/ratchet (N=6) + idea batches #1/#2, all dead; repoint record |
+| [`tasks/todo.md`](tasks/todo.md) | Go-live ship checklist (the $25 Kalshi account) |
+| [`tasks/review_engine_logic.md`](tasks/review_engine_logic.md), [`tasks/review_backtest_stats.md`](tasks/review_backtest_stats.md) | Pre-live adversarial reviews — LIVE trading-path logic + backtest stats/methodology |
+| [`tasks/engine_review_2026-06-02.md`](tasks/engine_review_2026-06-02.md), [`tasks/engine_hardening_review_2026-06-03.md`](tasks/engine_hardening_review_2026-06-03.md) | Engine correctness + hardening audits (2026-06-02 / 06-03) |
 
-Excluded from the index (auto-generated or vendored, no managerial role):
-`__pycache__/`, `archive/` (legacy notebooks/scripts), `logs/`, `data/*.parquet`.
+Excluded from the index (auto-generated, vendored, or leaf point-in-time records, no managerial role):
+`__pycache__/`, `archive/` (legacy notebooks/scripts), `logs/`, `data/*.parquet`,
+`tasks/council-transcript-*.md` (leaf decision deliberation, like a decision-log entry).
 
 **Hygiene rule:** when adding any managerial md file (decision log, runbook, lessons),
 also add a row to this table in the same commit.

@@ -5,6 +5,27 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L19 — Relocate exactly what was asked; don't bundle adjacent data the user didn't name (scope-creep on infra ops)
+
+**Context.** Asked to move the **raw weather market data** out to `..\data\weather` "with the logger data",
+I relocated BOTH the orderbook (raw market data) AND the **bot logs** (`data/{paper,live}` live_log /
+positions) + repointed the tracker + set `WA_LOCAL_DATA`/`WA_DATA_DIR`. The user corrected: "keep the bot
+logs here in this project folder. I just want the raw weather market data moved." I reverted the bot-state
+move + the tracker change; only the orderbook moved (and later the truth tape, when explicitly asked).
+
+**Rule.** On a relocate / move / cleanup op, move ONLY the named target. "Move X" ≠ "move X plus the
+adjacent Y that the same pipeline happens to touch." Bot logs and market data are different categories; the
+user named one. When one instruction could touch several datasets, relocate the explicit one and leave (or
+ask about) the rest — don't infer that "consolidate" means "everything." This is CLAUDE.md rule #9 (match
+scope to ask) applied to infra/data ops; the mirror of [[L9]] (test the *whole* proposal) — here, do
+*exactly* the proposal, not more.
+
+**Why it matters.** Over-moving bot logs out of the repo silently broke the tracker's default path (I had to
+add, then revert, a `WA_DATA_DIR` knob) and would have scattered state the user wanted version-adjacent. A
+relocate that grabs more than asked is a reversible-but-noisy detour that erodes trust on "just do X."
+
+---
+
 ## L18 — Filter a multi-entity log by entity before per-entity analysis; and INVESTIGATE an anomalous validation number, don't rationalize it
 
 **Context.** Built `scripts/forward_edge_tracker.py` to score forward Chicago fires from the resident

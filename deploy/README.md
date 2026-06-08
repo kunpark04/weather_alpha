@@ -123,6 +123,14 @@ catch-up-on-wake covers it.)
 Prereq: the same passwordless SSH key the zip pull uses. Host via `WA_HOST` (falls back to `OB_HOST`);
 `WA_REMOTE_PROJ` defaults to `projects/weather-alpha`, `WA_LOCAL_DATA` to the repo's `data/`.
 
+**Raw market-data location.** Only the **orderbook depth** (raw weather *market* data — the bulk) is
+relocated off the repo, via the `OB_LOCAL_DIR` User env var (the zip-pull task inherits it at run
+time). **This machine** points it at `..\data\weather\orderbook`. The **bot logs**
+(`live_log`/`positions`, written by `PullBotState`) deliberately stay in the repo's
+`data\{paper,live}` — `WA_LOCAL_DATA`/`WA_DATA_DIR` are left unset, so `pull-state.ps1`,
+`merge_state.py`, and `forward_edge_tracker.py` all default to the repo `data/`. (`data/backfill/`
+also stays — `load_city` hardcodes the repo path.)
+
 ```powershell
 $env:WA_HOST = 'fa@137.184.128.37'
 pwsh -NoProfile -File scripts\pull-state.ps1            # test once (rotates+pulls, merges into data\)
@@ -146,8 +154,35 @@ Register-ScheduledTask -TaskName 'PullBotState' -Action $act -Trigger $trg -Sett
 
 After it runs, score the forward edge: `python scripts/forward_edge_tracker.py` (the `FWD-TRACK`
 rollup; HANDOFF §1.7 / §7). Forward fires are **captured** immediately; they **score** once their
-settled day lands in the backfill tape (`scripts/backfill_historical.py KXHIGHCHI`) — until then the
-tracker lists them as "open (awaiting truth)".
+settled day lands in the truth tape — kept current by the `RefreshTruthTape` job below.
+
+## Refresh the truth tape (scheduled)
+The truth tape (`data\backfill`, a junction to `..\data\weather\backfill`) is what `load_city` reads
+for settlement outcomes. Recent settled days come from Kalshi's **authenticated** live tier, and this
+laptop has no key — so `scripts/refresh-truth-tape.ps1` does the fetch **on the droplet** (which has
+`secrets/kalshi-rw.env`) and then moves the zips down with the **same zip/move/delete convention** as
+the orderbook pull:
+
+1. SSH → `backfill_cities.py --days N --series …` on the droplet (authed; resumable; writes
+   `data/backfill/<series>/<date>.zip` there).
+2. Pull those zips into the local tape and **delete them from the droplet** (byte-verify first), by
+   reusing `pull-orderbook-zips.ps1` in move-mode → droplet stays lean.
+
+Because the droplet copies are deleted, each run **re-fetches the `--days` window** (the cost of the
+lean-droplet convention). Tune with `TAPE_DAYS` (default 7) / `TAPE_SERIES` (default all 20). The local
+tape **accumulates**; only the droplet side is pruned.
+
+```powershell
+$env:WA_HOST = 'fa@137.184.128.37'
+pwsh -NoProfile -File scripts\refresh-truth-tape.ps1            # test (TAPE_SERIES/TAPE_DAYS to scope)
+# daily Scheduled Task (stable pwsh alias; laptop-friendly), AFTER the 8:00/8:10 pulls:
+$pwsh = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'; if(-not(Test-Path $pwsh)){$pwsh=(Get-Command pwsh).Source}
+$ps1 = (Resolve-Path scripts\refresh-truth-tape.ps1).Path
+$act = New-ScheduledTaskAction  -Execute $pwsh -Argument "-NoProfile -File `"$ps1`"" -WorkingDirectory (Resolve-Path .).Path
+$trg = New-ScheduledTaskTrigger -Daily -At 8:20am
+$set = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+Register-ScheduledTask -TaskName 'RefreshTruthTape' -Action $act -Trigger $trg -Settings $set -Force
+```
 
 ## Windows (if you must)
 A Windows laptop still won't survive shutdown. If you have an always-on Windows box,

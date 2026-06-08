@@ -25,13 +25,13 @@
   nothing is deleted until verified here. Register with -StartWhenAvailable to catch up on next wake
   (deploy/README.md -> "Pull bot state").
 
-  Config: WA_HOST (or OB_HOST), WA_REMOTE_PROJ (default '.' = remote $HOME, flat layout), WA_MODES
+  Config: WA_HOST (or OB_HOST), WA_REMOTE_PROJ (default 'weather-alpha' = ~/weather-alpha, nested layout), WA_MODES
   (default "paper live"), WA_LOCAL_DATA (default repo data/). Needs passwordless key SSH.
 #>
 $ErrorActionPreference = 'Stop'
 
 $RemoteHost = if ($env:WA_HOST) { $env:WA_HOST } elseif ($env:OB_HOST) { $env:OB_HOST } else { throw 'set WA_HOST (or OB_HOST), e.g. weather-alpha@137.184.128.37 or an ssh config alias' }
-$RemoteProj = if ($env:WA_REMOTE_PROJ) { $env:WA_REMOTE_PROJ } else { '.' }                              # flat layout: project IS remote $HOME
+$RemoteProj = if ($env:WA_REMOTE_PROJ) { $env:WA_REMOTE_PROJ } else { 'weather-alpha' }                  # nested layout: project at ~/weather-alpha
 $Modes      = if ($env:WA_MODES)       { $env:WA_MODES }       else { 'paper live' }                    # space-separated
 $LocalData  = if ($env:WA_LOCAL_DATA)  { $env:WA_LOCAL_DATA }  else { (Resolve-Path (Join-Path $PSScriptRoot '..\data')).Path }
 $Inbox      = Join-Path $LocalData 'state_inbox'

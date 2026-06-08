@@ -14,14 +14,14 @@
   lean-droplet convention). Tune the load with TAPE_DAYS / TAPE_SERIES. The local tape ACCUMULATES
   (only the droplet side is pruned); load_city reads it via the data\backfill junction.
 
-  Config: WA_HOST (or OB_HOST), WA_REMOTE_PROJ (default '.' = remote $HOME, flat layout), TAPE_DAYS (default 7),
+  Config: WA_HOST (or OB_HOST), WA_REMOTE_PROJ (default 'weather-alpha' = ~/weather-alpha, nested layout), TAPE_DAYS (default 7),
   TAPE_SERIES (default all 20), WA_BACKFILL_LOCAL (default ..\data\weather\backfill). The droplet must
   have secrets/kalshi-rw.env (used READ-ONLY here -- backfill only GETs).
 #>
 $ErrorActionPreference = 'Stop'
 
 $RemoteHost = if ($env:WA_HOST) { $env:WA_HOST } elseif ($env:OB_HOST) { $env:OB_HOST } else { throw 'set WA_HOST (or OB_HOST)' }
-$RemoteProj = if ($env:WA_REMOTE_PROJ) { $env:WA_REMOTE_PROJ } else { '.' }   # flat layout: project IS remote $HOME
+$RemoteProj = if ($env:WA_REMOTE_PROJ) { $env:WA_REMOTE_PROJ } else { 'weather-alpha' }   # nested layout: project at ~/weather-alpha
 $Days       = if ($env:TAPE_DAYS) { $env:TAPE_DAYS } else { '7' }
 $Series     = if ($env:TAPE_SERIES) { $env:TAPE_SERIES } else {
     'KXHIGHCHI KXHIGHTHOU KXHIGHNY KXHIGHMIA KXHIGHAUS KXHIGHDEN KXHIGHPHIL KXHIGHLAX KXHIGHTLV KXHIGHTNOLA KXHIGHTSEA KXHIGHTSFO KXHIGHTDC KXHIGHTATL KXHIGHTMIN KXHIGHTPHX KXHIGHTBOS KXHIGHTDAL KXHIGHTOKC KXHIGHTSATX' }

@@ -5,12 +5,16 @@ The logger (`scripts/orderbook_logger.py`) must run on an **always-on host**. It
 Run it on a cheap/free 24/7 box and let `systemd` keep it alive.
 
 > **Actual production droplet:** `weather-alpha@137.184.128.37` (DigitalOcean NYC1, Ubuntu 24.04,
-> 1 vCPU / 1 GB). The home dir **is** the project (flat layout: `~` = repo root), checked out as a
-> **lean sparse + `--filter=blob:none` partial** clone — only `weather_alpha config scripts deploy`,
-> **never the full repo** (no notebooks/historical/archive/model artifacts; `tasks/lessons.md` L20).
-> Migrated from user `fa` → `weather-alpha` on 2026-06-08 (`deploy/migrate-to-weather-alpha.md`). The
-> generic recipes below use **illustrative** users/paths (`fa` no longer exists; `/opt/weather-alpha`,
-> `~/weather-alpha` are examples) — adapt them to the flat `weather-alpha@host` reality above.
+> 1 vCPU / 1 GB). The project lives in a **nested `~/weather-alpha` subdir at mode `0700`** (accessible
+> only by root + the `weather-alpha` user): the git worktree root, `.venv`, `data/`, and `secrets/` all
+> sit under `/home/weather-alpha/weather-alpha/`, while home root keeps only shell dotfiles + `.ssh/` +
+> `.config/systemd/user/`. Checked out as a **lean sparse + `--filter=blob:none` partial** clone — only
+> `weather_alpha config scripts deploy`, **never the full repo** (no notebooks/historical/archive/model
+> artifacts; `tasks/lessons.md` L20). History: migrated user `fa` → `weather-alpha` (flat home) on
+> 2026-06-08, then relocated flat → nested `~/weather-alpha` (0700) the same day
+> (`deploy/migrate-to-weather-alpha.md`). The generic Option A/B recipes below assume a clone at
+> `~/weather-alpha` — which now matches the real droplet; `/opt/weather-alpha` and user `fa` are
+> illustrative only (`fa` no longer exists).
 
 ## Why it stopped before
 Two usual causes, both fixed here:
@@ -73,8 +77,8 @@ morning — the local copy runs ~1 day behind by design, and a missed run self-h
 
 Prereq: passwordless SSH from your machine to the host (key-based; for an unattended job the
 key must have no passphrase or live in an agent). Set the host via the `OB_HOST` env var (or
-edit the config block atop the script). `OB_REMOTE_DIR` defaults to `data/orderbook`
-(home-relative — the droplet's flat layout; was `projects/weather-alpha/data/orderbook`); `OB_LOCAL_DIR`
+edit the config block atop the script). `OB_REMOTE_DIR` defaults to `weather-alpha/data/orderbook`
+(home-relative — the droplet's nested `~/weather-alpha` layout); `OB_LOCAL_DIR`
 defaults to `~/weather-alpha-data/orderbook`.
 
 **Windows analysis box** — `scripts/pull-orderbook-zips.ps1` (native ssh/scp, no rsync):
@@ -103,7 +107,7 @@ crontab -e        # then add a daily pull (move-mode; a missed run self-heals):
 
 Drop `OB_MOVE` to fall back to copy-mode (host keeps every zip). In copy-mode, if the host's
 disk later gets tight, prune already-pulled zips on the host with e.g.
-`find ~/data/orderbook -name '*.zip' -mtime +30 -delete`.
+`find ~/weather-alpha/data/orderbook -name '*.zip' -mtime +30 -delete`.
 
 ## Pull bot state — live_log history + positions snapshot (scheduled)
 The forward-edge tracker (`scripts/forward_edge_tracker.py`, HANDOFF §1.7) reads
@@ -132,7 +136,7 @@ add `-WakeToRun` to the settings + enable wake timers in the power plan; usually
 catch-up-on-wake covers it.)
 
 Prereq: the same passwordless SSH key the zip pull uses. Host via `WA_HOST` (falls back to `OB_HOST`);
-`WA_REMOTE_PROJ` defaults to `.` (= remote `$HOME`; flat layout), `WA_LOCAL_DATA` to the repo's `data/`.
+`WA_REMOTE_PROJ` defaults to `weather-alpha` (= `~/weather-alpha`; nested layout), `WA_LOCAL_DATA` to the repo's `data/`.
 
 **Raw market-data location.** Only the **orderbook depth** (raw weather *market* data — the bulk) is
 relocated off the repo, via the `OB_LOCAL_DIR` User env var (the zip-pull task inherits it at run

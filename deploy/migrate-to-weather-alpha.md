@@ -1,5 +1,13 @@
 # Droplet migration: `fa` → `weather-alpha`, flattened layout
 
+> **⚠️ SUPERSEDED 2026-06-08 (same day):** the flat home layout this runbook produces was immediately
+> **relocated into a nested `~/weather-alpha` subdir at mode `0700`** (root + the `weather-alpha` user
+> only). The Phase 0–3 sections below are the historical `fa`→`weather-alpha` *flat* migration; the
+> **current** droplet layout is `/home/weather-alpha/weather-alpha/{weather_alpha, config, scripts,
+> deploy, data, secrets, .venv, …}`. Current laptop pull env vars are `WA_REMOTE_PROJ=weather-alpha`
+> and `OB_REMOTE_DIR=weather-alpha/data/orderbook` — **NOT** the `.` / `data/orderbook` shown in Phase 2.
+> See the **"Relocation"** section at the bottom for exactly what changed.
+
 **Goal.** Move the project from `/home/fa/projects/weather-alpha/` to a dedicated user whose **home IS
 the project** (`/home/weather-alpha/{weather_alpha, config, scripts, deploy, data, secrets, .venv, …}`),
 and decommission `fa`. One-user-per-project; the home dir becomes the write boundary.
@@ -138,3 +146,36 @@ sudo -u fa systemctl --user start orderbook-logger-user weather-alpha-paper weat
   move; if it were absolute, fix it in `/home/weather-alpha/secrets/kalshi-rw.env`.
 - **Truth tape / orderbook on the laptop** are unaffected (they live under `..\data\weather\`); only the
   pull source (`WA_HOST`/`WA_REMOTE_PROJ`) changes.
+
+---
+
+## Relocation: flat → nested `~/weather-alpha` (0700) — 2026-06-08
+
+Right after the flat migration above, the project was moved out of `$HOME` into a dedicated
+**`~/weather-alpha` subdir, `chmod 700`** (accessible only by root + the `weather-alpha` user). The
+shared droplet hosts other project-users, so a `0700` subdir is the explicit read/write boundary —
+independent of the `0775` home. Done in one window with **~7 s** of service downtime, with no LIVE trade
+at risk (Chicago's 1 PM-CT anchor + 60-min window had already closed for the day).
+
+1. `[wa]` stop the 3 `systemd --user` services (`weather-alpha-live`, `weather-alpha-paper`,
+   `orderbook-logger-user`).
+2. `[wa]` `mkdir ~/weather-alpha`; `mv` every project item (`.git .venv weather_alpha config scripts
+   deploy data secrets logs`, docs, `pyproject.toml`, …) into it — **keeping** `.ssh/`,
+   `.config/systemd/user/`, and shell dotfiles in `$HOME` (same filesystem → `mv` is instant).
+3. `[wa]` `chmod 700 ~/weather-alpha`.
+4. `[wa]` fix the **absolute** `KALSHI_PRIVATE_KEY_PATH` inside `secrets/kalshi-rw.env`
+   (`/home/weather-alpha/secrets/…` → `/home/weather-alpha/weather-alpha/secrets/…`) — it is NOT
+   relative, despite the Phase 0 note above; the bot loses its key without this.
+5. `[wa]` re-point the venv editable install **without touching deps** (preserve the exact live
+   versions — no drift on the money path): `~/weather-alpha/.venv/bin/python -m pip install -e . --no-deps`;
+   validate `import weather_alpha`. (A moved venv works in place — `pyvenv.cfg` travels with it — only the
+   editable finder needed re-pointing.)
+6. `[wa]` rewrite the 3 unit files' paths and reload:
+   `sed -i 's#/home/weather-alpha#/home/weather-alpha/weather-alpha#g' ~/.config/systemd/user/*.service`
+   → `systemctl --user daemon-reload` → restart → confirm all `active`.
+7. `[LOCAL]` re-point pulls (User scope): `WA_REMOTE_PROJ=weather-alpha`,
+   `OB_REMOTE_DIR=weather-alpha/data/orderbook` (the 3 scheduled tasks inherit these on next run). The
+   script **defaults** were also updated to the nested values, so a fresh checkout needs no env override.
+
+**Rollback:** `mv ~/weather-alpha/* back to $HOME`, revert the unit `sed`, restore the absolute key path,
+re-point the laptop env vars to `.` / `data/orderbook`.

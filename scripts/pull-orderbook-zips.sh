@@ -20,7 +20,7 @@
 set -euo pipefail
 
 HOST="${OB_HOST:?set OB_HOST, e.g. weather-alpha@your-logger-host (or an ~/.ssh/config alias)}"
-REMOTE_DIR="${OB_REMOTE_DIR:-data/orderbook}"   # path on the host (rel = from $HOME; flat layout)
+REMOTE_DIR="${OB_REMOTE_DIR:-weather-alpha/data/orderbook}"   # path on the host (rel = from $HOME; nested ~/weather-alpha layout)
 LOCAL_DIR="${OB_LOCAL_DIR:-$HOME/weather-alpha-data/orderbook}"        # where to land them here
 
 mkdir -p "$LOCAL_DIR"

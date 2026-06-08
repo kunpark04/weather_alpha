@@ -28,7 +28,7 @@
 $ErrorActionPreference = 'Stop'
 
 $RemoteHost = if ($env:OB_HOST)       { $env:OB_HOST }       else { throw 'set OB_HOST, e.g. weather-alpha@your-logger-host (or an ssh config alias)' }
-$RemoteDir  = if ($env:OB_REMOTE_DIR) { $env:OB_REMOTE_DIR } else { 'data/orderbook' }  # path on host (rel = from $HOME; flat layout)
+$RemoteDir  = if ($env:OB_REMOTE_DIR) { $env:OB_REMOTE_DIR } else { 'weather-alpha/data/orderbook' }  # path on host (rel = from $HOME; nested ~/weather-alpha layout)
 $LocalDir   = if ($env:OB_LOCAL_DIR)  { $env:OB_LOCAL_DIR }  else { Join-Path $HOME 'weather-alpha-data\orderbook' }
 $Move       = [bool]$env:OB_MOVE
 $RemoteTar  = '.ob-pull.tar.gz'                              # temp archive INSIDE $RemoteDir (never the host $HOME)

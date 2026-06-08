@@ -7,7 +7,8 @@ prevents recurrence. Most recent first.
 
 ## L20 — The droplet carries a sparse + partial checkout, NEVER the full repo
 
-**Context.** After flattening the droplet (user `fa` → `weather-alpha`, home = project), the user set a
+**Context.** After flattening the droplet (user `fa` → `weather-alpha`, home = project; the project was
+later relocated into a nested `~/weather-alpha` `0700` subdir on 2026-06-08), the user set a
 standing rule: *"Only pull what is necessary for the logger in droplet (never pull/clone entire repo)."*
 The `rsync` rebuild carried only fa's existing **sparse-checkout** (cone: `weather_alpha config scripts
 deploy`) of a **partial clone** (`--filter=blob:none`, `.git` = 1.3M) — no `notebooks/`, `historical/`,

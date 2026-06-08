@@ -479,7 +479,14 @@ async def preflight(cfg: Config, book: Book, client: KalshiClient) -> None:
                 logger.info("  %s %s x%d @ %d¢%s", p.ticker, p.side, p.contracts, p.avg_price_cents, flag)
         except Exception:
             logger.exception("preflight: get_positions failed (continuing)")
-    for market in cfg.markets:
+    # Same anti-429 pacing as run_cycle: this startup preview fetches EVERY market (all tz at once),
+    # so without spacing it bursts the public market-data endpoint and litters the log with 429
+    # tracebacks on every restart. The reads are read-only and non-blocking for trading, but stagger
+    # them anyway for clean restart logs. Only the first market fires at t0.
+    stagger_s = cfg.scheduler.inter_market_stagger_seconds
+    for i, market in enumerate(cfg.markets):
+        if i and stagger_s > 0:
+            await asyncio.sleep(stagger_s)
         try:
             today = pd.Timestamp.now(tz=market.local_tz).normalize().tz_localize(None)
             contracts = await client.fetch_event(today, market.event_pattern)

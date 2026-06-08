@@ -229,8 +229,8 @@ between markets) so a same-tz batch doesn't 429. **Added 2026-06-07** after the 
 ~5-min cycle tick. The higher auth tier alone wasn't enough under the simultaneous burst (+ the
 orderbook logger sharing the droplet IP). Note `fetch_event` still has **no** per-call 429
 retry/backoff — only the *order-placement* path does (commit `1bcf1f7`, 400 invalid_parameters); the
-stagger is the read-path mitigation. The startup preflight's 20-call burst is the one remaining
-unspaced read (cosmetic — a try/excepted preview, no trade/data impact). Deploy units carry an optional
+stagger is the read-path mitigation. Both `run_cycle` AND the startup `preflight` preview apply it
+(2026-06-07), so neither bursts the endpoint — restart logs are clean. Deploy units carry an optional
 read-only `EnvironmentFile` (`deploy/weather-alpha-paper.service`, `deploy/orderbook-logger-user.service`).
 
 ---

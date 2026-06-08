@@ -298,6 +298,26 @@ def test_run_cycle_no_stagger_when_disabled():
     assert sleeps == [], sleeps
 
 
+def test_preflight_staggers_market_fanout():
+    # Clean-restart-logs fix: preflight previews EVERY market (all tz at once), so it must space the
+    # reads like run_cycle or it 429-bursts the public endpoint on every restart. Paper -> verify_bankroll
+    # is a no-op and the is_live get_positions block is skipped, so _MockKalshi (fetch_event only) suffices.
+    cfg = load_config(_write_cfg([_CHI, _NYC, _LAX]))
+    cfg = dataclasses.replace(
+        cfg, scheduler=dataclasses.replace(cfg.scheduler, inter_market_stagger_seconds=0.01))
+    sleeps: list[float] = []
+    real_sleep = engine.asyncio.sleep
+    async def _record(s):
+        sleeps.append(s)
+        await real_sleep(0)
+    engine.asyncio.sleep = _record
+    try:
+        asyncio.run(engine.preflight(cfg, Book(), _MockKalshi()))
+    finally:
+        engine.asyncio.sleep = real_sleep
+    assert sleeps == [0.01, 0.01], sleeps       # 3 markets -> one stagger before each after the first
+
+
 def test_run_cycle_honors_halt():
     cfg = load_config(_write_cfg([_CHI]))
     book = Book(); book.halted_stations = ["KMDW"]

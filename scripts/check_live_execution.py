@@ -1,13 +1,13 @@
-"""Verification of the LIVE execution safety fixes (C1 / C3 / C4).
+"""Verification of the LIVE execution safety fixes (C1 / C3 / C4 + W3).
 
 Uses a mock Kalshi client — no creds, no network. Run after touching execution.py:
     python scripts/check_live_execution.py        # -> ALL PASS
 
 Asserts:
   - full fill  -> Book records the ACTUAL filled count at the observed avg price (C1)
-  - no fill    -> nothing booked (no phantom position); leg retriable next cycle (C1)
-  - partial    -> Book records only what filled (C1)
-  - client_order_id is deterministic: f"wa-{anchor}-{ticker}-{side}" (C4)
+  - no fill    -> nothing booked (no phantom position); resting order cancelled; retriable (C1/#4)
+  - partial    -> Book records only what filled AND the resting remainder is cancelled (C1/W3)
+  - client_order_id is unique-per-cycle: f"wa-{anchor}-{ticker}-{side}-{run_utc_ms}" (W3, was C4)
   - intraday outlay over daily_max_loss_usd -> halt before placing (C3)
 """
 from __future__ import annotations
@@ -48,6 +48,7 @@ class MockClient:
         self.ticker = ticker
         self.avg_cents = avg_cents
         self.placed: list[dict] = []
+        self.cancelled: list[str] = []
 
     async def get_positions(self):
         qty = self._seq[min(self._i, len(self._seq) - 1)]
@@ -57,6 +58,10 @@ class MockClient:
     async def place_order(self, **kw):
         self.placed.append(kw)
         return {"order_id": "mock-1"}
+
+    async def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
+        return {"ok": True}
 
 
 def _cfg_live(daily_max_loss_usd: float | None = None):
@@ -94,34 +99,34 @@ async def _run(before, after, target=3, daily_max_loss_usd=None):
     res = await execute(_cfg_live(daily_max_loss_usd), _pred(anchor), [c], strat, book, client)
     held = book.open_for(ticker, "yes")
     coid = client.placed[0]["client_order_id"] if client.placed else None
-    return res, (held.contracts if held else 0), coid
+    return res, (held.contracts if held else 0), coid, len(client.cancelled)
 
 
 def main() -> int:
     ok = True
 
-    # 1. Full fill: before 0, after 3 -> book 3.
-    res, held, coid = asyncio.run(_run(0, 3, target=3))
-    exp_coid = "wa-2026-05-30-KX-T-yes"
-    t1 = held == 3 and res.fills == 1 and coid == exp_coid
+    # 1. Full fill: before 0, after 3 -> book 3. coid is unique-per-cycle (W3): prefix + ms token.
+    res, held, coid, ncanc = asyncio.run(_run(0, 3, target=3))
+    exp_prefix = "wa-2026-05-30-KX-T-yes-"
+    t1 = held == 3 and res.fills == 1 and (coid or "").startswith(exp_prefix) and coid != exp_prefix[:-1]
     print(f"[full]    booked={held} fills={res.fills} coid={coid}  -> {'PASS' if t1 else 'FAIL'}")
     ok &= t1
 
-    # 2. No fill: before 0, after 0 -> book nothing, no phantom.
-    res, held, coid = asyncio.run(_run(0, 0, target=3))
-    t2 = held == 0 and res.fills == 0 and res.skipped == 1
-    print(f"[nofill]  booked={held} fills={res.fills} skipped={res.skipped}  -> {'PASS' if t2 else 'FAIL'}")
+    # 2. No fill: before 0, after 0 -> book nothing, no phantom; resting order cancelled (#4).
+    res, held, coid, ncanc = asyncio.run(_run(0, 0, target=3))
+    t2 = held == 0 and res.fills == 0 and res.skipped == 1 and ncanc == 1
+    print(f"[nofill]  booked={held} fills={res.fills} skipped={res.skipped} cancels={ncanc}  -> {'PASS' if t2 else 'FAIL'}")
     ok &= t2
 
-    # 3. Partial: before 0, after 2 of 3 -> book 2.
-    res, held, coid = asyncio.run(_run(0, 2, target=3))
-    t3 = held == 2 and res.fills == 1
-    print(f"[partial] booked={held} fills={res.fills}  -> {'PASS' if t3 else 'FAIL'}")
+    # 3. Partial: before 0, after 2 of 3 -> book 2 AND cancel the resting remainder (W3).
+    res, held, coid, ncanc = asyncio.run(_run(0, 2, target=3))
+    t3 = held == 2 and res.fills == 1 and ncanc == 1
+    print(f"[partial] booked={held} fills={res.fills} cancels={ncanc}  -> {'PASS' if t3 else 'FAIL'}")
     ok &= t3
 
     # 4. C3 intraday outlay breaker: cap $1.00 but order cost 3*45c=$1.35 -> halt
     #    before placing, book 0.
-    res, held, coid = asyncio.run(_run(0, 3, target=3, daily_max_loss_usd=1.00))
+    res, held, coid, ncanc = asyncio.run(_run(0, 3, target=3, daily_max_loss_usd=1.00))
     t4 = (held == 0 and res.fills == 0
           and res.diagnostics.get("halt_reason") == "daily_outlay_cap")
     print(f"[C3 cap]  booked={held} fills={res.fills} halt={res.diagnostics.get('halt_reason')}"

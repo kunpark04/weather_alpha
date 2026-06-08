@@ -17,13 +17,14 @@ import pandas as pd
 
 from weather_alpha.config import Config, MarketCfg
 from weather_alpha.data import DataBundle, latest_viable_anchor, load_bundle, refresh_live
-from weather_alpha.execution import ExecutionResult, KillSwitchTripped, execute, reconcile_settlements
+from weather_alpha.execution import (
+    ExecutionResult, KillSwitchTripped, check_daily_loss, execute, reconcile_settlements)
 from weather_alpha.features import build_features
 from weather_alpha.kalshi import KalshiClient, event_date_code
 from weather_alpha.live_fetchers import fetch_live_cli
 from weather_alpha.model import ModelArtifacts, Prediction, predict_for_anchor
 from weather_alpha.pmf import INTEGER_F_GRID
-from weather_alpha.positions import Book
+from weather_alpha.positions import Book, RunBudget
 from weather_alpha.report import report, usd
 from weather_alpha.strategy import StrategyOutput, run_strategy, run_wing_strategy
 
@@ -100,13 +101,38 @@ async def run_cycle(
     target_markets = markets if markets is not None else cfg.markets
     # W4: latch any pre-existing drawdown BEFORE trading, so the first city is gated too.
     _latch_halts(cfg, book)
+    # W1: ONE order-attempt budget shared across every market this cycle, so
+    # cfg.risk.per_anchor_max_trades is a true per-CYCLE backstop (sums across cities) rather
+    # than resetting per market. With K=1 this is identical to the old per-market counter.
+    budget = RunBudget(cap=cfg.risk.per_anchor_max_trades)
+    # I2: ONE account-wide realized-daily-loss gate per cycle (was N per-market raises inside
+    # execute(), each keyed to that city's anchor date). A breach gates NEW ORDERS for every city
+    # but settlement + re-sync still run. This makes the account-wide accumulator gate the whole
+    # account on ANY breached date (the intended account-wide semantics) instead of only cities
+    # whose specific anchor date breached; in practice the gate is ~always 0 at decision time
+    # (realized loss accrues only at next-day settlement), so this is a clarity refinement.
+    gated_reason: str | None = None
+    try:
+        check_daily_loss(cfg, book)
+    except KillSwitchTripped as e:
+        gated_reason = str(e)
 
     results: list[CycleResult] = []
     total_realized = 0
-    for market in target_markets:
+    # Pace the per-market Kalshi reads. Cities sharing a 1 PM local anchor (e.g. every Eastern
+    # city) arrive here as ONE batch, and each market opens with a fetch_event GET; firing them
+    # back-to-back bursts Kalshi's public market-data endpoint and trips a 429 (observed
+    # 2026-06-06: PHIL/DC/BOS lost a cycle, recovering only on the next tick). A small
+    # inter-market delay spreads the reads under the rate limit — negligible vs the 60-min
+    # post-anchor window, and only the first city fires at t0.
+    stagger_s = cfg.scheduler.inter_market_stagger_seconds
+    for i, market in enumerate(target_markets):
+        if i and stagger_s > 0:
+            await asyncio.sleep(stagger_s)
         try:
             r = await _run_one_market(cfg, market, art, book, kalshi,
-                                      bundle=bundle, force_anchor=force_anchor)
+                                      bundle=bundle, force_anchor=force_anchor, budget=budget,
+                                      gated_reason=gated_reason)
         except Exception:
             # Isolate a per-market failure (bad data / parse / network) so one city can
             # never take down the others — critical when a live city shares the process.
@@ -125,6 +151,10 @@ async def run_cycle(
     if total_realized:
         await _resync_bankroll_after_settlement(cfg, book, kalshi)
         _latch_halts(cfg, book)
+    # W4 RECON: replace this cycle's per-fill fee ESTIMATES on still-open positions with the
+    # exchange-truth fees from /portfolio/positions, so when they settle (next cycle) the realized
+    # PnL — and the drawdown HWMs it feeds — is exact. LIVE only; a fetch failure is swallowed.
+    await _reconcile_book_fees(cfg, book, kalshi)
     book.save(cfg.paths.positions_snapshot)
     return results
 
@@ -138,6 +168,8 @@ async def _run_one_market(
     *,
     bundle: DataBundle | None,
     force_anchor: pd.Timestamp | None = None,
+    budget: RunBudget | None = None,
+    gated_reason: str | None = None,
 ) -> CycleResult:
     """One city's slice of a cycle: predict → strategize → execute → settle (its station)."""
     if cfg.model.enabled:
@@ -186,18 +218,27 @@ async def _run_one_market(
         strat = _dispatch_strategy(cfg, pred, contracts, feature_row, bankroll)
         _report_decision(tag, strat)
 
-    try:
-        exec_result = await execute(cfg, pred, contracts, strat, book,
-                                    kalshi if cfg.is_live() else None, market=market,
-                                    bankroll_usd=bankroll)
-    except KillSwitchTripped as e:
-        # #5: the kill switch / daily-loss cap blocks NEW ORDERS only — settlement of
-        # prior-day positions (below) and the bankroll re-sync must still run.
+    if gated_reason is not None:
+        # I2: the cycle-level daily-loss gate tripped — block NEW ORDERS for this city, but fall
+        # through to settlement + re-sync below (same contract as the kill-switch gate, #5).
         logger.warning("[%s] execution gated (%s) — no new orders; settlement still runs",
-                       market.name, e)
-        report(f"{tag} ⛔ GATED — {e}; no new orders (settlement still runs)")
+                       market.name, gated_reason)
+        report(f"{tag} ⛔ GATED — {gated_reason}; no new orders (settlement still runs)")
         exec_result = ExecutionResult(fills=0, skipped=0, realized_orders=[],
-                                      diagnostics={"gated": str(e)})
+                                      diagnostics={"gated": gated_reason})
+    else:
+        try:
+            exec_result = await execute(cfg, pred, contracts, strat, book,
+                                        kalshi if cfg.is_live() else None, market=market,
+                                        bankroll_usd=bankroll, budget=budget)
+        except KillSwitchTripped as e:
+            # #5: the kill switch blocks NEW ORDERS only — settlement of prior-day positions
+            # (below) and the bankroll re-sync must still run.
+            logger.warning("[%s] execution gated (%s) — no new orders; settlement still runs",
+                           market.name, e)
+            report(f"{tag} ⛔ GATED — {e}; no new orders (settlement still runs)")
+            exec_result = ExecutionResult(fills=0, skipped=0, realized_orders=[],
+                                          diagnostics={"gated": str(e)})
     _report_fills(tag, exec_result)
 
     # Settlement for THIS market's station only.
@@ -372,6 +413,21 @@ async def _resync_bankroll_after_settlement(cfg: Config, book: Book, client: Kal
         logger.exception("post-settlement balance refresh failed; keeping prior bankroll")
 
 
+async def _reconcile_book_fees(cfg: Config, book: Book, client: KalshiClient | None) -> None:
+    """W4 RECON: overwrite each open Book position's estimated fee with the exchange-truth
+    fees_paid_dollars from /portfolio/positions (LIVE only; PAPER has no exchange). Runs once at
+    end of cycle after fills. A fetch failure never aborts the cycle — the per-fill estimate stays
+    until next time, and the post-settlement get_balance() re-sync still keeps the cash figure honest."""
+    if not cfg.is_live() or client is None or not book.positions:
+        return
+    try:
+        net = book.reconcile_fees(await client.get_positions())
+        if net:
+            logger.info("W4 RECON: open-position fees reconciled to exchange truth (net %+d¢)", net)
+    except Exception:
+        logger.exception("W4 fee reconciliation failed; keeping per-fill fee estimates")
+
+
 def _latch_halts(cfg: Config, book: Book) -> None:
     """Refresh drawdown peaks + latch per-city/account halts against the running balance,
     reporting any newly-latched halt. Called before the market loop and after each market's
@@ -423,7 +479,14 @@ async def preflight(cfg: Config, book: Book, client: KalshiClient) -> None:
                 logger.info("  %s %s x%d @ %d¢%s", p.ticker, p.side, p.contracts, p.avg_price_cents, flag)
         except Exception:
             logger.exception("preflight: get_positions failed (continuing)")
-    for market in cfg.markets:
+    # Same anti-429 pacing as run_cycle: this startup preview fetches EVERY market (all tz at once),
+    # so without spacing it bursts the public market-data endpoint and litters the log with 429
+    # tracebacks on every restart. The reads are read-only and non-blocking for trading, but stagger
+    # them anyway for clean restart logs. Only the first market fires at t0.
+    stagger_s = cfg.scheduler.inter_market_stagger_seconds
+    for i, market in enumerate(cfg.markets):
+        if i and stagger_s > 0:
+            await asyncio.sleep(stagger_s)
         try:
             today = pd.Timestamp.now(tz=market.local_tz).normalize().tz_localize(None)
             contracts = await client.fetch_event(today, market.event_pattern)

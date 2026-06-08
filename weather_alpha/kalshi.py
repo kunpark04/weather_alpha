@@ -79,6 +79,11 @@ class KalshiPosition:
     side: str                         # "yes" | "no"
     contracts: int
     avg_price_cents: int
+    # W4: exchange-truth lifetime figures for this market position (cents). Both are REQUIRED
+    # fields on the /portfolio/positions MarketPosition (realized_pnl_dollars, fees_paid_dollars);
+    # default 0 keeps non-API constructors (tests / legacy callers) working.
+    realized_pnl_cents: int = 0
+    fees_paid_cents: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +107,34 @@ def _sign_request(key: rsa.RSAPrivateKey, timestamp_ms: int, method: str, path: 
         hashes.SHA256(),
     )
     return base64.b64encode(sig).decode("ascii")
+
+
+# Order-rate-throttle hardening: Kalshi rejects orders placed too rapidly in a burst with HTTP 400
+# code=invalid_parameters (observed in live smoke testing). The SAME code is also used for a
+# genuinely malformed order, so we can't distinguish them — we retry a FEW times with backoff then
+# give up: a transient throttle clears on the backoff, a truly bad order just fails after the
+# retries (a few seconds later). A 400 means the order was NOT created, so re-sending the same
+# client_order_id across retries cannot double-fill.
+_ORDER_RATE_RETRIES = 3
+_ORDER_RATE_BACKOFF_S = 0.5
+
+# Read-path 429 hardening: the public market-data GET (fetch_event) is UNauthenticated, so it shares
+# Kalshi's low per-IP tier with the orderbook logger running on the same host — a same-tz fan-out, or
+# the all-markets preflight preview, can 429 even when staggered (observed: 15/20 preflight reads 429'd
+# at a 0.5 s stagger because the logger saturates the tier). Retry honoring the Retry-After header
+# (else exponential backoff), then give up so a persistent failure still surfaces. GETs are idempotent,
+# so a retry can never double-anything.
+_READ_RETRIES = 6              # ~9.5 s total window (0.5+1+2+3+3) — empirically 4 left 2/20 preflight
+_READ_BACKOFF_S = 0.5          # reads still 429'ing under logger contention; 6 rides out the gaps
+_READ_BACKOFF_CAP_S = 3.0
+
+
+def _is_rate_throttle(resp) -> bool:
+    """True if a 400 response is Kalshi's order-rate throttle (code=invalid_parameters)."""
+    try:
+        return (resp.json().get("error") or {}).get("code") == "invalid_parameters"
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +181,38 @@ class KalshiClient:
 
     # ---- public endpoints -----------------------------------------------------
 
+    async def _get_with_retry(self, path: str, *, params: dict | None = None) -> httpx.Response:
+        """GET a public endpoint, retrying transient 429/5xx with Retry-After-aware backoff.
+        A 2xx returns; a non-transient 4xx raises immediately (a real error, not a throttle).
+        See the _READ_RETRIES note — the public read path shares the low unauthenticated tier."""
+        delay = _READ_BACKOFF_S
+        r: httpx.Response | None = None
+        for attempt in range(_READ_RETRIES):
+            r = await self._http.get(path, params=params)
+            if r.status_code != 429 and r.status_code < 500:
+                r.raise_for_status()                 # 2xx -> ok; other 4xx -> raise (a real error)
+                return r
+            if attempt + 1 >= _READ_RETRIES:
+                break                                # exhausted -> fall through and raise below
+            ra = r.headers.get("Retry-After")
+            try:
+                wait = float(ra) if ra else delay
+            except ValueError:
+                wait = delay
+            wait = min(wait, _READ_BACKOFF_CAP_S)
+            logger.debug("GET %s: HTTP %d — retry %d/%d after %.2fs",
+                         path, r.status_code, attempt + 1, _READ_RETRIES, wait)
+            await asyncio.sleep(wait)
+            delay *= 2
+        assert r is not None
+        r.raise_for_status()                         # persistent 429/5xx -> surface it
+        return r
+
     async def fetch_event(self, settlement_date: pd.Timestamp,
                           event_pattern: str = "KXHIGHCHI") -> list[KalshiContract]:
         """Fetch the contracts for one settlement date's event."""
         ticker = f"{event_pattern}-{event_date_code(settlement_date)}"
-        r = await self._http.get("/markets", params={"event_ticker": ticker})
-        r.raise_for_status()
+        r = await self._get_with_retry("/markets", params={"event_ticker": ticker})
         markets = r.json().get("markets", [])
         contracts: list[KalshiContract] = []
         for m in markets:
@@ -227,7 +286,18 @@ class KalshiClient:
         payload = {k: v for k, v in payload.items() if v is not None}
         logger.info("Kalshi place_order %s %s %s x %d @ %d¢", action, side, ticker,
                     count, limit_price_cents)
-        return await self._signed_request("POST", "/portfolio/orders", json=payload)
+        for attempt in range(_ORDER_RATE_RETRIES):
+            try:
+                return await self._signed_request("POST", "/portfolio/orders", json=payload)
+            except httpx.HTTPStatusError as e:
+                if (e.response.status_code == 400 and attempt + 1 < _ORDER_RATE_RETRIES
+                        and _is_rate_throttle(e.response)):
+                    logger.warning("place_order %s: 400 invalid_parameters (rate throttle?) — "
+                                   "retry %d/%d after backoff", ticker, attempt + 1, _ORDER_RATE_RETRIES)
+                    await asyncio.sleep(_ORDER_RATE_BACKOFF_S * (2 ** attempt))
+                    continue
+                raise
+        raise RuntimeError("unreachable")  # loop always returns or raises within the retry budget
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
         logger.info("Kalshi cancel_order %s", order_id)
@@ -300,6 +370,10 @@ def _parse_positions(data: dict[str, Any]) -> list[KalshiPosition]:
     `market_exposure_dollars` (fixed-point dollars). The legacy integer `position` and
     `market_exposure` (cents) were scheduled for removal on 2026-03-12. Prefer the new
     fields and fall back to the legacy pair only when the new ones are absent.
+
+    W4: also surfaces the exchange-truth `realized_pnl_dollars` + `fees_paid_dollars` (both
+    REQUIRED MarketPosition fields) as cents, so a Book↔exchange reconciliation can prefer the
+    real figures over the bot's per-fill fee estimate. Missing → 0 (legacy payload / cents-only).
     """
     out: list[KalshiPosition] = []
     for p in data.get("market_positions", []):
@@ -316,8 +390,30 @@ def _parse_positions(data: dict[str, Any]) -> list[KalshiPosition]:
             side="yes" if qty > 0 else "no",
             contracts=abs(qty),
             avg_price_cents=int(exposure_cents / max(abs(qty), 1)),
+            realized_pnl_cents=int(round(_fp(p.get("realized_pnl_dollars")) * 100)),
+            fees_paid_cents=int(round(_fp(p.get("fees_paid_dollars")) * 100)),
         ))
     return out
+
+
+def order_ack_fee_cents(ack: dict[str, Any]) -> tuple[int | None, int | None]:
+    """W4: the exchange-reported (fee_cents, fill_count) from a place_order CreateOrderResponse.
+
+    The order is nested under `order`; per the verified OpenAPI spec it carries
+    `taker_fees_dollars` + `maker_fees_dollars` (total charged fee = their sum) and
+    `fill_count_fp` (contracts filled at ack time). Returns (None, None) when the ack lacks the
+    fee fields (e.g. a resting order, the mock test client, or a schema we don't recognize) so
+    the caller falls back to the trade_fee_cents estimate. The fill_count lets the caller use
+    the ack fee ONLY when it corresponds to the same quantity the position poll confirmed."""
+    order = ack.get("order") if isinstance(ack.get("order"), dict) else ack
+    taker = order.get("taker_fees_dollars")
+    maker = order.get("maker_fees_dollars")
+    if taker is None and maker is None:
+        return None, None
+    fee_cents = int(round((_fp(taker) + _fp(maker)) * 100))
+    fc = order.get("fill_count_fp")
+    fill_count = int(round(_fp(fc))) if fc is not None else None
+    return fee_cents, fill_count
 
 
 def _spec_from_market(m: dict[str, Any]) -> str:

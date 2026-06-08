@@ -17,11 +17,14 @@ resident process (all cities, one per mode) or as per-city one-shots fired by a 
 $23.56 balance; the first live order/fill fires at the next 1 PM CT anchor (unexercised until
 then). Mode is **per-process** — one LIVE process, one PAPER process, never mixed.
 
-**Deployed 2026-06-02:** the PAPER bot (CHI+HOU) + the orderbook logger run **24/7 on a
+**Deployed 2026-06-02:** the PAPER bot + the orderbook logger run **24/7 on a
 DigitalOcean droplet** (`systemd --user` + linger; survives reboot). A daily Task-Scheduler job
-on the local box pulls each settled-day orderbook zip down (move-mode). **LIVE since 2026-06-02:** the Chicago LIVE bot is armed (adopted the real $23.56 balance), a
-paper bot shadows CHI+HOU alongside it, and the first real order fires at the next 1 PM CT anchor. See
-[`HANDOFF.md`](HANDOFF.md) §7 `DEPLOY`.
+on the local box pulls each settled-day orderbook zip down (move-mode). **LIVE since 2026-06-02:** the Chicago LIVE bot is armed (adopted the real $23.56 balance) and the
+first real order fires at the next 1 PM CT anchor. **As of 2026-06-05** the PAPER bot shadows **all 20
+cities** and the logger logs **all 20 series** (both authenticate the RW key *read-only*; paper still
+places no real orders). A deep-history study (3.4 yr × 20 cities) found **only Chicago has a durable
+edge** and **maker execution doesn't rescue the rest** (adverse selection). See
+[`HANDOFF.md`](HANDOFF.md) §1.6 and §7 `DEPLOY`.
 
 > **Production pivoted 2026-05-29 → `market_wing + drop_lower_ask`, flat-$ sizing, model-free**
 > (strategy unchanged since). Wired into the engine and validated in paper (no model, no weather,

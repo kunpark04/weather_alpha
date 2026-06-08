@@ -5,6 +5,365 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L18 — Filter a multi-entity log by entity before per-entity analysis; and INVESTIGATE an anomalous validation number, don't rationalize it
+
+**Context.** Built `scripts/forward_edge_tracker.py` to score forward Chicago fires from the resident
+bot's `live_log.parquet`. The resident PAPER bot logs **all 20 cities** to one log, but `_fires()`
+filtered by mode + date only — **not by series** — so it lumped every city's filled legs into each
+"fire" and matched them against Chicago's settled winner. Result when truth finally landed: 0% win
+rate, breakeven WR **290%**, edge **−290¢/$payout** (impossible — a coverage bet can't lose >100¢ per
+$1 payout), and a Chicago-only realized of **−$19.99** that contradicted the bot's whole-book −$4.99.
+The fix was one line: `df[df.ticker.str.startswith(f"{series}-")]`. Truth after the fix: Chicago has
+fired **0** times forward (paper all `no_target`, live gated) — the "4 fires" I'd reported were
+entirely other cities.
+
+**The worse mistake: I had already SEEN the bug and explained it away.** The earlier smoke test
+(`--since 2026-05-01`) printed "1 fire, −$222.81, 12,499 contracts" and I called it "the pre-production
+test fills, exactly the stale data I'm validating against" — a rationalization. A 12,499-contract,
+−$222 "fire" on a flat-$2.50 strategy was nonsensical and was the **same multi-city bug**; I shipped
+the script and updated docs on the back of a validation run whose output I had hand-waved.
+
+**Rules.**
+- **Any per-entity metric computed from a shared multi-entity log/table must filter to that entity
+  FIRST.** When a file aggregates many keys (cities, accounts, symbols), the entity filter is part of
+  correctness, not a nicety — state the key and assert it (here: ticker prefix == series).
+- **An impossible number is a bug signal, not a data quirk — stop and trace it.** Breakeven WR >100%,
+  edge worse than the max possible loss, a per-slice total exceeding the whole — these are structurally
+  impossible, so the code is wrong. Never explain an impossible value as "weird input."
+- **Don't certify a tool on a validation run you had to rationalize.** If the smoke-test output needs a
+  hand-wave ("that's just test data"), the smoke test FAILED — investigate until the number is
+  explained by the data, or the tool isn't validated. (Echoes [[L10]]/[[L14]]: bound/trust numbers
+  against what's structurally possible; here, a sane-range check would have caught it immediately.)
+- **Validate a multi-entity reader on ≥2 entities, like a parser ([[L5]]).** One-city output can look
+  plausible; the cross-entity contamination only shows when a second entity's rows are present.
+
+**Why it matters.** I reported "4 Chicago forward fires, −$4.99" to the user as fact; the truth was
+N=0 for Chicago. A confidently-wrong forward number is exactly what would corrupt the
+accumulate-to-significance decision the tracker exists to support. The impossible 290% breakeven was a
+free tell I'd have caught by sanity-checking the range before reporting.
+
+---
+
+## L17 — "Survives fees" ≠ "confirmed edge": replay the EXACT config net of the REAL fee in DOLLARS, then discount a max-selected, single-regime OOS for multiplicity + regime before calling it real
+
+**Context.** Asked whether the production edge survives the real Kalshi fee, I replayed the exact
+production config (`scripts/chicago_oos_netfee.py`) with the real `ceil()` fee — the §1.6 `+5.0¢`
+Chicago headline (`per_city_synthesis.py`) had used a **continuous fee proxy** (`0.07·a·(1−a)`) in
+**normalized ¢/$payout**. The fee question had a clean answer (edge survives: realistic OOS
+`+5.0 → +4.6¢`, ~8% drag), but the result was THREE optimisms stacked, only one of which was the fee.
+
+**The three stacked optimisms (each a different way to over-claim an edge).**
+1. **Continuous fee < real ceil fee.** The ceil rounds each per-leg fee UP; at ~2–3 contracts/leg that
+   is ~0.4–0.5¢/$payout the proxy omitted. Cost the strategy with the SAME fee fn the live path calls
+   (`weather_alpha.fees.trade_fee_cents`), never a smooth approximation.
+2. **Normalized ¢/$payout hides the dollar magnitude.** +4.6¢/$payout is a healthy *normalized* edge
+   but only **+$16/yr** on flat $2.50. Report BOTH the normalized edge (comparability) AND the actual
+   dollars (the "is this worth it" decision) — a normalized number alone launders lunch money as a
+   strong edge.
+3. **A max-selected, single-regime OOS is not a confirmed OOS.** Chicago is the WINNER of 20 cities
+   scored on the same tape (§1.6) → its OOS look is multiplicity-inflated; and its OOS window is
+   *entirely* the recent dense-liquidity regime (realistic fill 22→33→98→100% by year), so realistic≈
+   proxy OOS holds only because adverse selection recently vanished — through-cycle edge is ~+2.5¢, not
+   +5¢. Honest verdict: "positive, borderline (binomial p=0.11, bootstrap P(≤0)≈0.05), recent-regime,"
+   not "confirmed."
+
+**Rules.**
+- **To kill or confirm an after-cost edge, replay the EXACT production fn with the EXACT live fee, in
+  dollars** — not a normalized proxy. State the dollar magnitude alongside the normalized one.
+- **Run the structurally-correct significance test, not just a t-stat.** For a high-WR coverage
+  (favorite-longshot) bet the test is WR vs the per-day breakeven (binomial / Clopper–Pearson),
+  reported next to the dollar t-test and a bootstrap CI. "Positive point estimate" ≠ "significant."
+- **Discount a selected estimate for HOW it was selected.** If the city/param was the max of N on the
+  same data, the OOS p is multiplicity-inflated; if the OOS window is one regime (liquidity, season),
+  the edge may be regime-bound, not forward. Name both discounts explicitly.
+- **Answer the asked question AND surface the one that actually binds.** The fee question was a clean
+  YES; the binding uncertainty was significance + selection + regime. Don't let a tidy answer to the
+  asked question imply the decision is settled.
+- **Check the headline's own caveat before quoting it.** `per_city_synthesis`'s docstring already said
+  the continuous fee made its edges "a touch optimistic" — the proxy flagged its own optimism; read it
+  before quoting +5.0¢ as if it were the live-realizable number.
+
+**Why it matters.** "+5.0¢ realistic OOS, only Chicago durable" reads as a confirmed, ship-it edge; the
+honest version ("survives fees, but +$16/yr, p≈0.11, selection- and regime-contaminated → needs genuine
+forward data") drives the opposite call: don't scale, don't fund, accumulate forward fills first.
+Extends [[L12]] (OOS-first; bigger sample is still in-sample), [[L14]] (separate backtest OUTPUT from
+input skepticism — here the inputs were the fee model + the selection), and [[L10]] (bound the noise
+before reporting a delta).
+
+---
+
+## L16 — Harden EVERY external-call path, not just the obvious one; and a doc that says "spaced/retried" must point at code that does it (recurrence of L4)
+
+**Context.** The user asked whether the live/paper bots had traded and whether there was an
+error. PAPER had traded (26 legs); LIVE had not (Chicago-only, every day's wing failed the
+`max_ask_sum < 0.90` affordability gate — correct, not a bug). The real error: on 2026-06-06 the
+PAPER bot logged 7 `❌ cycle failed` lines. The traceback (`logs/paper/weather_alpha.log`) was
+**`httpx.HTTPStatusError: 429 Too Many Requests`** on `GET /markets?event_ticker=…` inside
+`kalshi.fetch_event` — Kalshi rate-limited the **read** path when every same-tz city fired its
+`fetch_event` in the same second at the top of the 1 PM anchor window.
+
+**Two mistakes it exposed.**
+1. **Asymmetric hardening.** Commit `1bcf1f7` added 429/throttle retry+backoff to the
+   *order-placement* path only. `fetch_event` (the public read every cycle makes for every city)
+   had **no** retry and **no** 429 handling — so the most-frequent external call was the least
+   protected. Recovery relied entirely on the coarse ~5-min cycle retry.
+2. **Doc claimed a guarantee the code didn't enforce (L4 again).** HANDOFF §1.6 said trade cycles
+   "iterate markets sequentially (spaced) so they don't 429" and that the preflight burst was "the
+   only residual." Neither was true: `run_cycle`'s loop had **no** inter-market delay, and the
+   trade cycle itself 429'd. The "higher auth tier" was assumed sufficient; it wasn't (the
+   orderbook logger shares the droplet IP).
+
+**Fix.** Added `scheduler.inter_market_stagger_seconds` (default 0.0; 0.5 in the resident
+`live.yaml`/`paper.yaml`); `run_cycle` AND `preflight` sleep it between markets. **The stagger alone
+proved insufficient** on deploy: `fetch_event` is *unauthenticated* (`self._http.get`, not signed), so
+the read-only-auth "higher tier" never applied to it — the read shares Kalshi's low per-IP tier with
+the always-on orderbook logger, and **15/20 preflight reads still 429'd at 0.5 s**. So a Retry-After-aware
+retry/backoff was added to the public read (`KalshiClient._get_with_retry`): 429 → wait → retry → success.
+It took **two iterations measured on the live droplet** — 4 attempts cut 15/20 → 2/20, then 6 attempts
+(~9.5 s window) reached **0/20** (verified). Stagger + retry together = clean restart logs and no city
+lost to a throttled anchor read. HANDOFF corrected to match each step (don't let it drift again).
+
+**Rules.**
+- When you add resilience (retry/backoff/rate-limit handling) to one external call, **audit the
+  sibling calls** — especially read paths that run far more often than the write path you just
+  fixed. Resilience asymmetry is a latent outage.
+- A burst is per-**process+IP**, not per-call: count *every* concurrent caller (here: bot fan-out
+  + the always-on logger on the same host) before declaring a rate-limit headroom "enough."
+- **Verify a documented guarantee against the code that enforces it** before trusting it (L4). If
+  HANDOFF says "spaced"/"retried"/"isolated", grep for the sleep/retry/try — don't assume.
+- Read the actual traceback (`logs/<mode>/weather_alpha.log`), not just the operator one-liner
+  (`❌ cycle failed (see logs)`), before judging severity. The one-liner hid a benign-but-real 429.
+
+---
+
+## L15 — A maker (passive) fill is adversely selected — "post at the bid" is not free spread; and read the data you HAVE before deciding you must wait for new data
+
+**Problem.** The realistic-fill work showed the limit-at-ask *taker* spread eats the edge for 19/20
+cities, so the obvious hope was MAKER execution (rest a bid, save the spread). I nearly framed it as
+"wait weeks for the order-book logger, then test." Two errors: (a) I hadn't checked whether existing
+data could answer it, and (b) "posting at the bid saves the spread" silently assumes the fill is
+unbiased. Verifying the backfill schema *directly* (the user's "do not assume code, verify it") found
+`taker_side` per trade (`yes`=lifted ask, `no`=hit bid) — enough to simulate a resting yes-bid on 3.4
+YEARS of real trades now (fills iff a `taker_side=="no"` sell prints at <= our bid in the window). The
+result killed the hope: maker fills are **adversely selected** — the WINNING leg fills LESS than the
+losing leg in 14/20 cities (Chicago 32% vs 42%; New Orleans 42% vs 74%). The market gives you the
+passive fill exactly when the bucket is turning into a loser, so you collect losers and miss payoffs;
+for Chicago (the one real edge) maker is strictly worse than taker (-11.8c vs +1.2c in-sample).
+
+**Solution / rules.**
+- **Before concluding "we must wait for new data," read the schema of the data you already have.**
+  One field (`taker_side`) turned a multi-week wait into a one-run answer on years of history.
+- **A fill you only get passively is selected, not random.** Never model a maker fill as "same win
+  rate, minus the spread." Split the fill rate by outcome (winner vs loser); if winners fill less,
+  the 'saved' spread is repaid as missed payoffs. State the selection direction.
+- **Make the optimism explicit and check robustness to it.** The trade-tape fill model ignores
+  queue/size -> it's an UPPER bound on fills; real maker fills are lower and MORE adverse. A negative
+  verdict under an optimistic model is conservative.
+
+**Why it matters.** Execution tricks are the classic "free money" trap, and tying the test to a
+multi-week wait would have delayed a decision-grade verdict the existing tape delivered immediately.
+Complements [[L14]] (separate backtest OUTPUT from input skepticism) and [[L11]] (a limit inferred
+from how WE collected data, not from what the source holds).
+
+---
+
+## L14 — Don't call a backtest-POSITIVE result "unprofitable"; say "not live-realizable" and name the input you distrust
+
+**Problem.** I showed the wing's `edge` (= coverage - cost - fee = EV per $1) RISING as the anchor
+moved into the afternoon, then called the late anchors "unprofitable / not tradeable." The user
+caught the contradiction: edge and PnL are the SAME quantity (backtest PnL is proportional to edge),
+so a rising edge is a rising backtest PnL -- the late anchors are MORE profitable in the backtest,
+not less. My "unprofitable" conflated *"the backtest says +X"* with *"I don't believe the backtest"*.
+The real claim was that the late edge is NOT LIVE-REALIZABLE, for input reasons -- which a Chicago
+diagnostic then made concrete: the trade the +1c ask is set off goes from **5 min stale at 1 PM to
+41 min stale at 4 PM** (the market goes quiet -> a "4 PM fill" is fictional), coverage drifts up
+(partial answer-leakage), and the late in-sample edge does not survive OOS (**2 PM: IS +8.1c ->
+OOS -5.8c**). So the late number is a stale-price artifact, not negative PnL.
+
+**Solution / rules.**
+- **Keep "what the backtest reports" separate from "what I believe is real."** When you distrust a
+  backtest-positive result, say "the backtest shows +X but it is not realizable because INPUT is
+  unrealistic (here: a stale/optimistic ask proxy)", never "it is unprofitable." The latter reads as
+  a data finding when it is a judgment override.
+- **A metric is only as honest as its inputs.** `edge = coverage - cost - fee` is the right EV
+  concept, but `cost = last_trade + 1c` is a proxy. Before trusting an edge number, check the price
+  input's realism -- staleness (minutes since the last trade), liquidity, spread. The proxy is least
+  biased on a fresh/liquid book (midday) and increasingly fictional late.
+- **State the optimism direction explicitly.** ALL these edge numbers are mildly optimistic (proxy
+  ask); the bias is smallest where the book is fresh (1 PM, ~5-min trades). The real fix is
+  order-book asks (logged forward by the orderbook logger; absent historically).
+- **A rising in-sample curve is not a free lunch** -- OOS-test it (here 2 PM flipped negative) AND
+  sanity-check the input that is moving (here cost falling on ever-staler prices, not coverage).
+
+**Why it matters.** Calling a backtest-positive result "unprofitable" erodes trust in every other
+number I report and hides the real, fixable issue (the price input). Complements [[L12]]/[[L13]]
+(OOS, axis power) -- here, separate the model's OUTPUT from skepticism about its INPUTS, and name the
+input.
+
+---
+
+## L13 — A cross-correlation is only as powered as its WEAKER axis; don't headline a null (or an effect) when one axis is known-thin
+
+**Problem.** I correlated an 11-year, exact-degF NOAA forecastability axis against a **67-day** Kalshi
+coverage axis, got Spearman -0.12, and headlined "the NOAA test REFUTES the -0.75 forecastability
+finding." The weather axis was robust; the *coverage* axis was one thin season (11-45 fired days/city,
+Chicago compressed to 96%). After the historical backfill made coverage a 3.4-year axis (Chicago 80%,
+543 fired), the SAME NOAA proxies re-correlated at **-0.56** (spread) / -0.53 (de-seasonalized) -- the
+null flipped to a moderate effect purely because the second axis gained power. I had flagged the
+coverage axis as thin, yet still led with "refuted," which I then had to retract.
+
+**Solution / rules.**
+- **Match the power of BOTH axes before interpreting a cross-city/cross-unit correlation.** A robust
+  measure correlated against a noisy one inherits the noise; the result is dominated by the weaker
+  axis. n=19 cities with one axis estimated from ~67 days is not a test of anything yet.
+- **If one axis is known-underpowered, REPORT THE CORRELATION AS UNRESOLVED, not as a null or an
+  effect.** "Can't tell until coverage is robust" was the correct headline; "-0.75 refuted" was not.
+  A null from a thin axis is indistinguishable from attenuation-by-noise.
+- **When an estimate is sensitive to a fixable axis, fix the axis before concluding.** The backfill
+  that powered the coverage axis was already in flight; I should have waited for it rather than
+  publish the thin-axis null as the headline.
+- **Corroboration across INDEPENDENT methods is the real signal.** The deep-coverage result is
+  trustworthy because two independent forecastability measures (Kalshi modal error AND NOAA exact
+  weather) both land at -0.5 to -0.7 -- not because either single correlation is large.
+
+**Why it matters.** I reversed a substantive root-cause conclusion ("weather doesn't explain
+coverage" -> "weather does explain coverage") inside one session, purely on axis power. Headlining the
+thin-axis null misled for a full turn. Extends [[L12]] (a bigger/again-robust sample changes the
+answer) and project rule #4 (sample-size discipline) to the *correlation* setting: discipline applies
+to every axis, not just the one you're focused on.
+
+---
+
+## L12 — On NEW/expanded data, re-apply the OOS time-split BEFORE reporting any edge; in-sample-only on a bigger sample is still in-sample
+
+**Problem.** After the historical backfill turned 67 days into 3.4 years, I ran the full per-city
+decomposition + PnL backtest and reported the in-sample headline (+$254 total, "10 profitable
+cities", Chicago +$141) — *in-sample only*, on data the strategy + gate (0.90, win_prob 0.92) were
+chosen on. The user had to interject "make sure THIS TIME we have an in-sample and OOS 80:20 split."
+When I built the temporal split, the story deflated sharply: the rich per-city edges (Miami +17.4c,
+NYC +9.8c in-sample) **decayed to ~breakeven OOS**; only **Chicago** kept a positive OOS edge
+(+8c/trade, +$12/75 fired days); IS->OOS edge rank-correlation was only +0.15-0.24; the in-sample
+selected basket was ~breakeven OOS (-$3). The one robustly-generalizing result was the *direction*
+(drop_lower_ask >> drop_higher_ask placebo, OOS, everywhere) — not the exploitable level.
+
+**Solution / rules.**
+- **A bigger sample is not a held-out sample.** Expanding the data (more days, more history) does
+  NOT substitute for a train/test split. The FIRST result reported on any new/expanded backtest
+  must be the OOS split, not the full-sample fit — especially when params/gate/strategy were chosen
+  on overlapping history. (Project rule #4 already mandates time-split validation; apply it
+  reflexively, not on request.)
+- **Default split: temporal, per-series 80:20** (first 80% of each city's days = IS/decide, last
+  20% = OOS/validate). Report IS and OOS side by side; flag thin-OOS rows (here OOS fired < 15) as
+  anecdote, and judge generalization on the deep series only.
+- **Separate "direction generalizes" from "level generalizes."** A signal can beat its placebo OOS
+  (mechanism real) while its after-cost edge collapses to breakeven (not tradeable). State both;
+  don't let a strong placebo contrast launder a thin absolute edge.
+- **Expect in-sample optimism and pre-empt it.** When a gate self-selects cheap days and the
+  strategy was picked post-hoc, the in-sample edge is an upper bound; quote the OOS number as the
+  headline and the in-sample as context, never the reverse.
+
+**Why it matters.** The in-sample "+$254 / 10 cities" would have justified expanding live trading to
+more cities; the OOS truth ("Chicago marginally, everyone else ~0") justifies the opposite. Reporting
+the in-sample number first risks anchoring a real-money decision on optimism. Complements [[L10]]
+(bound the noise) and project rule #4 (OOS-style validation) — here, do it *first* and *unprompted*.
+
+---
+
+## L11 — A data "cap" inferred from what's been collected (or from one endpoint tier) is not a real cap; check the provider's documented retention/historical tier before asserting a limit
+
+**Problem.** Asked whether the ~67-day backtest window could be extended, I asserted a hard limit
+*twice*, both wrong. First: the markets "launched ~March 2026, so 67 days is the entire history" —
+but that was only when **our** `backfill_cities.py` started collecting. The user pushed back
+("Kalshi temperature markets are open year round… NO reason it should be bounded to 67 days").
+Probing the API: `KXHIGHCHI` settled **events** go back to **2021-08** (1,746 days, a continuous
+wall — 28-31/month for 58 months). I then over-corrected into a *second* wrong claim — that the
+**prices** layer is "windowed to ~67 days" — because the *live* `/markets` + `/candlesticks`
+endpoints do stop at the cutoff (402 settled markets, oldest 2026-03-30; legacy `HIGHCHI` returns
+0). But Kalshi documents a **live-vs-historical data partition**: a separate **`/historical/*`**
+family (no auth) serves every market/trade/candlestick back to inception. `GET /historical/cutoff`
+= 2026-04-05 boundary; `GET /historical/markets?series_ticker=KXHIGHCHI` returns **8,575 markets to
+2021-08-20**, and the *oldest* day (`HIGHCHI-21AUG19-T81`) still has **11 candlesticks + 105 trades
+(all pre-1 PM)**. True depth ≈ **4.8 years**, not 67 days — a ~26× error that had silently framed
+every "within-noise, can't tell if the edge is real" conclusion this session.
+
+**Solution / rules.**
+- **A limit inferred from on-disk data measures OUR collection window, not availability.** Before
+  "that's all there is," query the provider for the full extent.
+- **One endpoint returning a short window ≠ the data is gone.** Check whether the provider
+  partitions live vs historical (Kalshi: `GET /historical/cutoff` + `/historical/*`). Probe **each
+  layer** — events, markets, trades, candlesticks can each have different reach (here events were
+  deep, *live* prices shallow, *historical* prices deep).
+- **Read the data-access docs before claiming a retention limit.** The historical tier was one
+  documented endpoint family away the entire time; one web search surfaced it.
+- **When the user insists a limit is wrong, treat it as a strong prior to re-derive from primary
+  sources, not to defend.** The user was right twice; I was wrong twice.
+
+**Why it matters.** A phantom data cap bounded the whole research program — "67 days, within noise"
+framed dozens of turns and nearly closed the book on the edge as unprovable. The real 4.8-yr archive
+makes Chicago/NY backtests ~20× larger and potentially *powered* enough to confirm or kill the edge.
+Extends project rule #4 (sample-size discipline): before concluding "underpowered," confirm you have
+actually pulled all the available sample.
+
+---
+
+## L10 — Re-implemented gates must match production's EXACT boundary; bound the noise before reporting a PnL delta
+
+**Problem.** An adversarial review of the walk-forward suite found two faults I had shipped as
+findings: (1) **boundary mismatch** — production fires iff `sum_asks < max_ask_sum` (rejects `>=`,
+`strategy.py:586`), but my walk-forward rebuilt the wing with a loose gate then re-applied
+`cost <= 0.90` (inclusive), counting 108 exactly-0.90 wings the live bot never trades; this inflated
+the headline (S +$9.15→+$2.81, SW +$5.91→+$0.54, H0 +$11.09→+$6.23, test days 398→381). (2)
+**within-noise point estimates reported as findings** — S−B +$31, full-wing edge +0.105, "H0 is
+best" were all presented as results when every per-trade edge was statistically indistinguishable
+from zero at one season (n≈110–338), and the full-wing edge was a day-population selection artifact
+(matched-day: the 2-leg actually wins).
+
+**Solution / rules.**
+- **When a backtest re-applies a production gate outside the production function, copy the exact
+  predicate** (operator *and* strictness) or call the production function directly; then count how
+  many cells sit on the boundary. A `<=` where production uses `<` silently books trades the live
+  engine can't. (Same family as [[L4]]: code must match the stated contract.)
+- **Before reporting a PnL delta as a finding, bound the noise** — MDE, a t/sign test, and a
+  leave-one-cluster(city)-out. State estimates with their band; a delta inside it is
+  "indistinguishable from zero," not an effect.
+- **To attribute an edge to an instrument/gate, hold the day-population FIXED** (matched sample).
+  A headline on a self-selected subpopulation measures the *selector*, not the instrument.
+- **Independent adversarial review earns its cost on any result that will drive a decision** — I
+  would otherwise have shipped inflated, within-noise conclusions as validated edge.
+
+**Why it matters.** Confident in-sample point estimates inside the noise band masquerade as
+validated edge and drive real-money decisions; a one-tick boundary mismatch compounds it by
+crediting fills that can't happen live. Complements [[L9]] (test the whole proposal) — here, test it
+*correctly* and *report it honestly*.
+
+---
+
+## L9 — When validating a user's proposed strategy, test the COMPLETE proposal, not a subset
+
+**Problem.** The user proposed a hybrid: trade the 2-leg wing when it has edge, **else fall back to
+the full 3-leg wing**, monitored intraday. I built the walk-forward with only the **2-leg** wing in
+every variant and concluded "monitoring doesn't help / the proposal doesn't beat status quo." The
+user caught it — I had never tested the full-wing fallback *at all*, which is the core instrument
+for the no-edge cities. When added, the full wing was the **highest-edge signal** (+0.105/trade,
+94% coverage) and the 1 PM hybrid was the **best variant** (+$33 vs status quo). My negative verdict
+had been drawn from a strategy missing half of what was proposed.
+
+**Solution / rules.**
+- **Enumerate every instrument/branch the user specified BEFORE coding the test**, and confirm each
+  appears in the implementation. A proposal of the form "A, else B" must exercise **B**, not just A.
+  Restate the proposal back as a checklist (here: {2-wing edge path, full-wing fallback, intraday
+  window}) and verify coverage — I had built only {2-wing, window}.
+- **A negative result on a partial implementation is not a verdict on the proposal.** Scope the
+  claim to what actually ran ("tested the 2-wing only"), never "the idea fails."
+- This is project CLAUDE.md behavioral rule #9 ("match scope to ask") applied to **test design**,
+  and the complement of [[L5]] (test the real/second *case*): also test the *whole* specified case.
+
+**Why it matters.** A confidently-wrong negative verdict can bury a user's correct idea — the full
+wing was genuinely the best signal here, and I'd have discarded it. A partial test that masquerades
+as a complete one is worse than no test: it ends inquiry with false authority.
+
+---
+
 ## L8 — Gitignore the secrets DIRECTORY, not just file extensions
 
 **Problem.** The repo `.gitignore` had `.env`, `*.key`, `*.pem` — which protected the PEM, but on

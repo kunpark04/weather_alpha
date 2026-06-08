@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 
 import pandas as pd
@@ -82,7 +83,11 @@ def _run_tui(cfg, art, book) -> int:
 async def _run_headless(cfg, art, book, args) -> int:
     force_anchor = pd.Timestamp(args.anchor).normalize() if args.anchor else None
 
-    async with KalshiClient(cfg.kalshi, authenticated=cfg.is_live()) as kalshi:
+    # Authenticate reads when a key is present: live always; paper too if creds are supplied —
+    # which is SAFE (paper never calls place_order; it's guarded by cfg.is_live() in execution.py)
+    # and gives the higher Kalshi rate-limit tier so a same-tz batch of cities won't 429.
+    _authed = cfg.is_live() or bool(os.environ.get(cfg.kalshi.key_id_env))
+    async with KalshiClient(cfg.kalshi, authenticated=_authed) as kalshi:
         # Activation preflight (read-only): wallet, open positions, today's market, strategy.
         await preflight(cfg, book, kalshi)
         if not args.loop:

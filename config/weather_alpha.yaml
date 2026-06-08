@@ -75,6 +75,7 @@ scheduler:
   anchor_grace_minutes: 5         # wait N minutes past anchor before reading features
   data_refresh_minutes: 15
   predict_lookback_hours: 2       # how far back to consider running an anchor if missed
+  inter_market_stagger_seconds: 0.5  # pace multi-market fan-out so a same-tz batch doesn't 429 Kalshi reads
 
 risk:
   daily_max_loss_usd: 100.0       # tripping this halts new entries for the rest of the day

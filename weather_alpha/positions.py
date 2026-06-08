@@ -32,6 +32,21 @@ class Position:
 
 
 @dataclass
+class RunBudget:
+    """W1: a single per-CYCLE order-attempt budget shared across every market in run_cycle.
+
+    `per_anchor_max_trades` is a process-wide runaway-order backstop, so the cap must sum
+    across ALL cities in one anchor cycle — not reset per market. run_cycle creates one of
+    these and threads it into each execute(); a submitted order consumes the budget whether
+    or not it fills (#10). With K=1 this is identical to the old per-market local counter."""
+    attempts: int = 0
+    cap: int = 0
+
+    def remaining(self) -> int:
+        return max(0, self.cap - self.attempts)
+
+
+@dataclass
 class Book:
     positions: dict[str, Position] = field(default_factory=dict)        # key = f"{ticker}:{side}"
     realized_pnl_cents: int = 0
@@ -107,13 +122,56 @@ class Book:
     def daily_outlay_cents(self, anchor_date: str) -> int:
         """Cents staked today for one anchor date = worst-case loss at risk before
         settlement. Used by the intraday circuit breaker (C3): daily_loss_cents only
-        accrues at next-day settlement, so stake-at-risk is the honest same-day proxy."""
+        accrues at next-day settlement, so stake-at-risk is the honest same-day proxy.
+
+        I4 (cross-tz): keyed by anchor_date, so cities sharing a calendar date (e.g. HOU+CHI,
+        both America/Chicago) bucket together — genuinely cumulative. Cities in DIFFERENT tz can
+        straddle the UTC date boundary and get SEPARATE anchor_date buckets here, while
+        exposure_cents() (un-keyed) still sums them. Both are intended; flagged so a future
+        cross-tz LIVE pair isn't a surprise."""
         return sum(int(p.contracts * p.avg_cost_cents)
                    for p in self.positions.values()
                    if p.anchor_date == anchor_date and not p.settled)   # W7: open stake only
 
     def open_for(self, ticker: str, side: str) -> Position | None:
         return self.positions.get(self._key(ticker, side))
+
+    def remove_position(self, ticker: str, side: str) -> None:
+        """W2 flatten: drop an OPEN position so the Book matches the exchange after a mid-wing
+        naked leg was flattened (sold) on the exchange. Reverses the entry-fee bump from add_fill;
+        the small round-trip realized loss is left to the post-settlement get_balance() re-sync
+        (the authoritative cash figure) — the per-position fields are estimate-grade until then.
+        No-op on a settled position (its realized PnL is already banked)."""
+        key = self._key(ticker, side)
+        p = self.positions.get(key)
+        if p is None or p.settled:
+            return
+        self.fees_paid_cents -= p.total_fees_cents
+        del self.positions[key]
+
+    def reconcile_fees(self, exchange_positions) -> int:
+        """W4 RECON: overwrite each OPEN position's ESTIMATED total_fees_cents with the exchange-truth
+        fee (`fees_paid_cents`, parsed from /portfolio/positions `fees_paid_dollars`), so the fee that
+        settlement subtracts — and thus the realized PnL feeding the drawdown HWMs — is exact rather
+        than the bot's `ceil(7%·N·P·(1−P))` per-fill estimate. Both are cumulative for the open market
+        position, so a straight overwrite is correct. `exchange_positions` is any iterable of objects
+        with `.ticker` / `.side` / `.fees_paid_cents` (KalshiPosition). A non-positive exchange fee is
+        treated as "no data" and skipped (keeps the estimate) so a legacy/absent field can't zero a
+        real fee. Returns the net cents adjusted to the account-wide `fees_paid_cents` (for logging)."""
+        truth = {(p.ticker, p.side): p.fees_paid_cents for p in exchange_positions}
+        net = 0
+        for pos in self.positions.values():
+            if pos.settled:
+                continue
+            t = truth.get((pos.ticker, pos.side))
+            if t is None or t <= 0:
+                continue
+            delta = t - pos.total_fees_cents
+            if delta:
+                pos.total_fees_cents = t
+                self.fees_paid_cents += delta
+                net += delta
+        return net
 
     # ---- drawdown circuit-breakers ---------------------------------------------
 

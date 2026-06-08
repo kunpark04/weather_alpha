@@ -1,69 +1,96 @@
 #requires -Version 7
 <#
 .SYNOPSIS
-  Pull settled-day orderbook zips from the always-on logger host to THIS Windows machine.
+  Pull settled-day orderbook zips from the always-on logger host to THIS Windows machine — BATCHED.
 
 .DESCRIPTION
-  Runs on your LOCAL / analysis box (Windows) — NOT the logger host. The logger writes
-  <series>/<date>.zip on the host once a day settles; this fetches each new zip down to you.
-  See deploy/README.md "Pull settled-day zips to your local machine".
+  Same job + env-var interface as before, but minimizes SSH round-trips. The old version opened a
+  fresh connection PER OPERATION (stat + scp + rm for every zip => ~3 connections/zip, ~13 for 4
+  zips), and each handshake to the droplet costs real seconds. Windows OpenSSH has NO ControlMaster
+  multiplexing (it actually BREAKS the connection if configured), so the portable fix is to batch:
 
-  Uses native OpenSSH (ssh.exe / scp.exe, built into Win10/11) — no rsync needed.
+    1) one ssh  -> list every remote *.zip WITH its byte size      (find -printf)
+    2) one ssh  -> tar+gzip the still-needed zips into ONE archive on the host
+    3) one scp  -> pull that single archive (reliable binary transfer)
+    4) one ssh  -> delete the verified zips (move mode) + the temp archive
+
+  => ~4 connections TOTAL no matter how many zips (was 1 + 3N). Touches only *.zip; the live raw
+  .jsonl folders are never read or deleted. Each zip's byte size is verified locally BEFORE any
+  remote delete, so a failed/partial pull never deletes the remote copy.
 
   Modes:
-    default (copy)   leave each zip on the host as a backup; copy only zips we don't have.
-    OB_MOVE set      MOVE: after a zip is copied AND its byte size matches the host's, delete
-                     it from the host (ssh rm), so it ends up ONLY here. The remote delete
-                     happens only after the local size is verified, so a failed/partial copy
-                     never deletes the remote copy.
-  Either mode touches only *.zip — the live raw .jsonl folders are never copied or deleted,
-  so the running logger is undisturbed. A missed run self-heals next time.
+    default (copy)   leave each zip on the host; only the temp archive is removed.
+    OB_MOVE set      after the archive is pulled, extracted, and every zip byte-verified locally,
+                     delete those zips from the host (one ssh) so they end up ONLY here.
 
-  Needs passwordless SSH from here to the host (key-based; for an unattended Task the key
-  must have no passphrase or be served by a persistent agent). Configure via the vars below
-  or the OB_HOST / OB_REMOTE_DIR / OB_LOCAL_DIR / OB_MOVE environment variables.
+  Config via OB_HOST (required), OB_REMOTE_DIR, OB_LOCAL_DIR, OB_MOVE. Needs passwordless key SSH.
 #>
 $ErrorActionPreference = 'Stop'
-$PSNativeCommandUseErrorActionPreference = $false   # we check ssh/scp/stat exit codes via $LASTEXITCODE ourselves (don't auto-throw per-file)
 
 $RemoteHost = if ($env:OB_HOST)       { $env:OB_HOST }       else { throw 'set OB_HOST, e.g. fa@your-logger-host (or an ssh config alias)' }
 $RemoteDir  = if ($env:OB_REMOTE_DIR) { $env:OB_REMOTE_DIR } else { 'projects/weather-alpha/data/orderbook' }  # path on host (rel = from $HOME)
 $LocalDir   = if ($env:OB_LOCAL_DIR)  { $env:OB_LOCAL_DIR }  else { Join-Path $HOME 'weather-alpha-data\orderbook' }
-$Move       = [bool]$env:OB_MOVE      # any non-empty value -> delete each zip from the host after verifying it here
+$Move       = [bool]$env:OB_MOVE
+$RemoteTar  = '.ob-pull.tar.gz'                              # temp archive in the host's $HOME
 
-# List every .zip on the host as paths relative to $RemoteDir (GNU find on the Linux host).
-$remoteZips = ssh $RemoteHost "find '$RemoteDir' -name '*.zip' -type f -printf '%P\n'"
+# Explicitly DISABLE multiplexing: Windows OpenSSH can't do ControlMaster, and a stray ControlMaster
+# block in ~/.ssh/config will otherwise break every connection ("Connection closed"). BatchMode so a
+# missing key fails fast instead of prompting; a sane connect timeout.
+$SshOpt = @('-o','BatchMode=yes','-o','ConnectTimeout=20','-o','ControlMaster=no','-o','ControlPath=none')
+
+function Invoke-Ssh([string]$cmd) { ssh @SshOpt $RemoteHost $cmd }
+function Test-LocalGood([string]$rel, [int64]$size) {
+    $lp = Join-Path $LocalDir ($rel -replace '/', '\')
+    (Test-Path -LiteralPath $lp) -and ((Get-Item -LiteralPath $lp).Length -eq $size)
+}
+
+# 1) one ssh: list every remote zip with its byte size (tab-separated).
+$listing = Invoke-Ssh "find '$RemoteDir' -name '*.zip' -type f -printf '%P`t%s`n'"
 if ($LASTEXITCODE -ne 0) { throw "ssh listing failed (exit $LASTEXITCODE) — check OB_HOST / SSH key / OB_REMOTE_DIR" }
 
-$pulled = 0; $removed = 0
-foreach ($rel in $remoteZips) {
-    $rel = $rel.Trim()
-    if (-not $rel) { continue }
-    $localPath = Join-Path $LocalDir ($rel -replace '/', '\')
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $localPath) | Out-Null
-
-    # Remote byte size — decides whether a copy is needed and gates any delete.
-    $sizeStr = (ssh $RemoteHost "stat -c %s '$RemoteDir/$rel'" | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $sizeStr -notmatch '^\d+$') { Write-Warning "stat failed for $rel — skipping"; continue }
-    $remoteSize = [int64]$sizeStr
-
-    $haveGood = (Test-Path -LiteralPath $localPath) -and ((Get-Item -LiteralPath $localPath).Length -eq $remoteSize)
-    if (-not $haveGood) {
-        scp "${RemoteHost}:$RemoteDir/$rel" $localPath
-        if ($LASTEXITCODE -ne 0) { Write-Warning "scp failed for $rel — left on remote"; continue }
-        $pulled++; Write-Host "pulled $rel"
-        $haveGood = (Test-Path -LiteralPath $localPath) -and ((Get-Item -LiteralPath $localPath).Length -eq $remoteSize)
-    }
-
-    if ($Move) {
-        if ($haveGood) {
-            ssh $RemoteHost "rm -f '$RemoteDir/$rel'"
-            if ($LASTEXITCODE -eq 0) { $removed++; Write-Host "  removed remote $rel" }
-            else { Write-Warning "  copied OK but remote rm failed for $rel" }
-        } else {
-            Write-Warning "size mismatch for $rel — left on remote (not deleted)"
-        }
-    }
+$remote = [ordered]@{}
+foreach ($line in ($listing -split "`n")) {
+    $line = $line.TrimEnd("`r"); if (-not $line.Trim()) { continue }
+    $rel, $sz = $line -split "`t", 2
+    if ($rel) { $remote[$rel] = [int64]$sz }
 }
-$summary = if ($Move) { "$pulled new, $removed removed from host" } else { "$pulled new" }
+if ($remote.Count -eq 0) { Write-Host 'no remote zips — nothing to do'; return }
+
+# which zips do we still need? (absent locally, or a size mismatch)
+$needed = @($remote.Keys | Where-Object { -not (Test-LocalGood $_ $remote[$_]) } | Sort-Object)
+
+# 2+3) tar the needed zips on the host into ONE archive, pull it, extract — one ssh + one scp.
+if ($needed.Count -gt 0) {
+    $fileArgs = ($needed | ForEach-Object { "'$_'" }) -join ' '
+    Invoke-Ssh "cd '$RemoteDir' && tar czf ~/'$RemoteTar' $fileArgs" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "remote tar failed (exit $LASTEXITCODE)" }
+
+    $localTar = Join-Path ([IO.Path]::GetTempPath()) 'ob-pull.tar.gz'
+    scp @SshOpt -q "${RemoteHost}:$RemoteTar" $localTar
+    if ($LASTEXITCODE -ne 0) { throw "scp of archive failed (exit $LASTEXITCODE)" }
+
+    New-Item -ItemType Directory -Force -Path $LocalDir | Out-Null
+    tar xzf $localTar -C $LocalDir
+    if ($LASTEXITCODE -ne 0) { throw "local extract failed (exit $LASTEXITCODE)" }
+    try { [IO.File]::Delete($localTar) } catch { }
+    Write-Host "pulled $($needed.Count) zip(s) in one archive"
+} else {
+    Write-Host 'all remote zips already present locally'
+}
+
+# 4) verify every remote zip now has a byte-matching local copy.
+$verified = @($remote.Keys | Where-Object { Test-LocalGood $_ $remote[$_] })
+foreach ($r in $remote.Keys) { if ($r -notin $verified) { Write-Warning "size mismatch/missing locally: $r (left on host)" } }
+
+# delete on host: verified zips (MOVE mode only) + always the temp archive if we made one — one ssh.
+$targets = @()
+if ($Move)              { $targets += ($verified | ForEach-Object { "'$RemoteDir/$_'" }) }
+if ($needed.Count -gt 0){ $targets += "~/'$RemoteTar'" }
+if ($targets.Count -gt 0) {
+    Invoke-Ssh ("rm -f " + ($targets -join ' ')) | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "remote cleanup rm exited $LASTEXITCODE" }
+}
+
+$summary = if ($Move) { "$($needed.Count) pulled, $($verified.Count) verified & removed from host" }
+           else        { "$($needed.Count) pulled (copy mode; host keeps zips)" }
 Write-Host "pull complete -> $LocalDir ($summary)"

@@ -77,6 +77,7 @@ scheduler:
   anchor_grace_minutes: 0         # fire AT each city's 1 PM (no buffer)
   data_refresh_minutes: 15
   predict_lookback_hours: 2
+  inter_market_stagger_seconds: 0.5  # space per-city Kalshi reads to avoid a 429 burst (multi-city)
 
 risk:
   daily_max_loss_usd: 15.0        # per-day stake-at-risk cap (was 100 = 4x the $25 acct); the

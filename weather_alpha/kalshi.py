@@ -118,6 +118,16 @@ def _sign_request(key: rsa.RSAPrivateKey, timestamp_ms: int, method: str, path: 
 _ORDER_RATE_RETRIES = 3
 _ORDER_RATE_BACKOFF_S = 0.5
 
+# Read-path 429 hardening: the public market-data GET (fetch_event) is UNauthenticated, so it shares
+# Kalshi's low per-IP tier with the orderbook logger running on the same host — a same-tz fan-out, or
+# the all-markets preflight preview, can 429 even when staggered (observed: 15/20 preflight reads 429'd
+# at a 0.5 s stagger because the logger saturates the tier). Retry honoring the Retry-After header
+# (else exponential backoff), then give up so a persistent failure still surfaces. GETs are idempotent,
+# so a retry can never double-anything.
+_READ_RETRIES = 4
+_READ_BACKOFF_S = 0.5
+_READ_BACKOFF_CAP_S = 3.0
+
 
 def _is_rate_throttle(resp) -> bool:
     """True if a 400 response is Kalshi's order-rate throttle (code=invalid_parameters)."""
@@ -171,12 +181,38 @@ class KalshiClient:
 
     # ---- public endpoints -----------------------------------------------------
 
+    async def _get_with_retry(self, path: str, *, params: dict | None = None) -> httpx.Response:
+        """GET a public endpoint, retrying transient 429/5xx with Retry-After-aware backoff.
+        A 2xx returns; a non-transient 4xx raises immediately (a real error, not a throttle).
+        See the _READ_RETRIES note — the public read path shares the low unauthenticated tier."""
+        delay = _READ_BACKOFF_S
+        r: httpx.Response | None = None
+        for attempt in range(_READ_RETRIES):
+            r = await self._http.get(path, params=params)
+            if r.status_code != 429 and r.status_code < 500:
+                r.raise_for_status()                 # 2xx -> ok; other 4xx -> raise (a real error)
+                return r
+            if attempt + 1 >= _READ_RETRIES:
+                break                                # exhausted -> fall through and raise below
+            ra = r.headers.get("Retry-After")
+            try:
+                wait = float(ra) if ra else delay
+            except ValueError:
+                wait = delay
+            wait = min(wait, _READ_BACKOFF_CAP_S)
+            logger.debug("GET %s: HTTP %d — retry %d/%d after %.2fs",
+                         path, r.status_code, attempt + 1, _READ_RETRIES, wait)
+            await asyncio.sleep(wait)
+            delay *= 2
+        assert r is not None
+        r.raise_for_status()                         # persistent 429/5xx -> surface it
+        return r
+
     async def fetch_event(self, settlement_date: pd.Timestamp,
                           event_pattern: str = "KXHIGHCHI") -> list[KalshiContract]:
         """Fetch the contracts for one settlement date's event."""
         ticker = f"{event_pattern}-{event_date_code(settlement_date)}"
-        r = await self._http.get("/markets", params={"event_ticker": ticker})
-        r.raise_for_status()
+        r = await self._get_with_retry("/markets", params={"event_ticker": ticker})
         markets = r.json().get("markets", [])
         contracts: list[KalshiContract] = []
         for m in markets:

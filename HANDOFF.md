@@ -221,16 +221,19 @@ config changes — all 20 were already correct.
 **Paper expanded to all 20 + read-only auth.** `config/paper.yaml` now lists all 20 cities; the paper
 bot and the logger both authenticate the read-WRITE key used **read-only** (`main.py` authenticates a
 paper read path when `KALSHI_KEY_ID` is in the env — SAFE: paper never calls `place_order`, guarded by
-`is_live()` in `execution.py`; the key only buys the higher Kalshi rate-limit tier). Trade cycles
-space the per-city reads via `scheduler.inter_market_stagger_seconds` (0.5 s; `run_cycle` sleeps
-between markets) so a same-tz batch doesn't 429. **Added 2026-06-07** after the read path actually
-429'd on 2026-06-06: a `fetch_event` GET burst at the top of the ET/CT anchor windows tripped
-`httpx 429` on PHIL/DC/BOS (HOU×3, BOS×2), each isolated per-market and recovered only on the next
-~5-min cycle tick. The higher auth tier alone wasn't enough under the simultaneous burst (+ the
-orderbook logger sharing the droplet IP). Note `fetch_event` still has **no** per-call 429
-retry/backoff — only the *order-placement* path does (commit `1bcf1f7`, 400 invalid_parameters); the
-stagger is the read-path mitigation. Both `run_cycle` AND the startup `preflight` preview apply it
-(2026-06-07), so neither bursts the endpoint — restart logs are clean. Deploy units carry an optional
+`is_live()` in `execution.py`; the key buys the higher rate-limit tier **only for SIGNED requests**).
+Two layers protect the public read path (`fetch_event`), **added 2026-06-07** after it 429'd on
+2026-06-06 (a GET burst at the top of the ET/CT anchor windows tripped `httpx 429` on PHIL/DC/BOS,
+HOU×3/BOS×2 — each isolated per-market, recovered only on the next ~5-min tick):
+(1) **Stagger** — `scheduler.inter_market_stagger_seconds` (0.5 s); both `run_cycle` and the startup
+`preflight` preview sleep it between markets so a same-tz batch isn't simultaneous.
+(2) **Retry** — `KalshiClient._get_with_retry` retries 429/5xx with a `Retry-After`-aware backoff
+(4 attempts) and only then raises. The retry is load-bearing: `fetch_event` is **unauthenticated**
+(`self._http.get`, not signed), so the read-only-auth tier does **not** apply to it — the read shares
+Kalshi's low per-IP tier with the always-on logger, and the stagger alone left **15/20 preflight reads
+still 429'ing at 0.5 s**. With the retry, 429 → wait → retry → success: restart logs are clean and a
+throttled anchor read no longer loses a city. (The order path's own 400-invalid_parameters retry,
+commit `1bcf1f7`, is separate.) Deploy units carry an optional
 read-only `EnvironmentFile` (`deploy/weather-alpha-paper.service`, `deploy/orderbook-logger-user.service`).
 
 ---

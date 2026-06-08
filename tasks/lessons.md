@@ -27,9 +27,13 @@ PAPER bot logged 7 `❌ cycle failed` lines. The traceback (`logs/paper/weather_
    orderbook logger shares the droplet IP).
 
 **Fix.** Added `scheduler.inter_market_stagger_seconds` (default 0.0; 0.5 in the resident
-`live.yaml`/`paper.yaml`); `run_cycle` sleeps it between markets so a same-tz batch is spread under
-the limit. Corrected the HANDOFF passage to match the code. (`fetch_event` still lacks a per-call
-429 retry — flagged in HANDOFF as the read-path follow-up if the stagger proves insufficient.)
+`live.yaml`/`paper.yaml`); `run_cycle` AND `preflight` sleep it between markets. **The stagger alone
+proved insufficient** on deploy: `fetch_event` is *unauthenticated* (`self._http.get`, not signed), so
+the read-only-auth "higher tier" never applied to it — the read shares Kalshi's low per-IP tier with
+the always-on orderbook logger, and **15/20 preflight reads still 429'd at 0.5 s**. So a Retry-After-aware
+retry/backoff was added to the public read (`KalshiClient._get_with_retry`, 4 attempts): 429 → wait →
+retry → success. Stagger + retry together = clean restart logs and no city lost to a throttled anchor
+read. HANDOFF corrected to match each step (don't let it drift again).
 
 **Rules.**
 - When you add resilience (retry/backoff/rate-limit handling) to one external call, **audit the

@@ -844,6 +844,55 @@ def test_place_order_does_not_retry_non_rate_400():
     assert n["calls"] == 1                                        # raised on first attempt, no retry
 
 
+class _FakeHttp:
+    """Stand-in for KalshiClient._http: returns queued responses for .get(); used by the read-retry
+    tests. Each .get() pops the next status from `seq` (last one repeats)."""
+    def __init__(self, seq):
+        self._seq = list(seq)
+        self.calls = 0
+    async def get(self, path, params=None):
+        self.calls += 1
+        status = self._seq[min(self.calls - 1, len(self._seq) - 1)]
+        body = {"markets": []} if status == 200 else {}
+        return httpx.Response(status, json=body, headers={"Retry-After": "0"},
+                              request=httpx.Request("GET", "http://x" + path))
+    async def aclose(self):
+        pass
+
+
+def test_fetch_event_retries_429_then_succeeds():
+    # READ-PATH 429 HARDENING: the unauthenticated market-data GET shares Kalshi's low per-IP tier with
+    # the orderbook logger; a 429 is retried (honoring Retry-After) and succeeds, so a same-tz fan-out /
+    # the preflight preview doesn't litter the log with tracebacks. GETs are idempotent -> retry is safe.
+    cli = KalshiClient(load_config(_write_cfg([_CHI])).kalshi, authenticated=False)
+    cli._http = _FakeHttp([429, 429, 200])
+    async def run():
+        try:
+            return await cli.fetch_event(pd.Timestamp("2026-06-01"), "KXHIGHCHI")
+        finally:
+            await cli.close()
+    out = asyncio.run(run())
+    assert cli._http.calls == 3 and out == []        # two 429s retried, third 200 -> empty event
+
+
+def test_fetch_event_raises_after_persistent_429():
+    # A persistent 429 (tier saturated) must still surface after the retry budget — not hang, not be
+    # swallowed — so the engine isolates that city and retries it next cycle.
+    cli = KalshiClient(load_config(_write_cfg([_CHI])).kalshi, authenticated=False)
+    cli._http = _FakeHttp([429])
+    async def run():
+        try:
+            await cli.fetch_event(pd.Timestamp("2026-06-01"), "KXHIGHCHI")
+        finally:
+            await cli.close()
+    try:
+        asyncio.run(run())
+        assert False, "expected HTTPStatusError after exhausting retries"
+    except httpx.HTTPStatusError:
+        pass
+    assert cli._http.calls == 4                       # _READ_RETRIES attempts, then raise
+
+
 def test_cycle_level_daily_loss_gate_blocks_orders_but_runs_settlement():
     # I2: a breached account-wide daily-loss accumulator gates the WHOLE cycle once (no new orders
     # for any city) while settlement still runs. Unit-check the gate fn + the run_cycle integration.

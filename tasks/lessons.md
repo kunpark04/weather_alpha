@@ -31,9 +31,10 @@ PAPER bot logged 7 `❌ cycle failed` lines. The traceback (`logs/paper/weather_
 proved insufficient** on deploy: `fetch_event` is *unauthenticated* (`self._http.get`, not signed), so
 the read-only-auth "higher tier" never applied to it — the read shares Kalshi's low per-IP tier with
 the always-on orderbook logger, and **15/20 preflight reads still 429'd at 0.5 s**. So a Retry-After-aware
-retry/backoff was added to the public read (`KalshiClient._get_with_retry`, 4 attempts): 429 → wait →
-retry → success. Stagger + retry together = clean restart logs and no city lost to a throttled anchor
-read. HANDOFF corrected to match each step (don't let it drift again).
+retry/backoff was added to the public read (`KalshiClient._get_with_retry`): 429 → wait → retry → success.
+It took **two iterations measured on the live droplet** — 4 attempts cut 15/20 → 2/20, then 6 attempts
+(~9.5 s window) reached **0/20** (verified). Stagger + retry together = clean restart logs and no city
+lost to a throttled anchor read. HANDOFF corrected to match each step (don't let it drift again).
 
 **Rules.**
 - When you add resilience (retry/backoff/rate-limit handling) to one external call, **audit the

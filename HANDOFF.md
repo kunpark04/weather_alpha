@@ -228,7 +228,7 @@ HOU×3/BOS×2 — each isolated per-market, recovered only on the next ~5-min ti
 (1) **Stagger** — `scheduler.inter_market_stagger_seconds` (0.5 s); both `run_cycle` and the startup
 `preflight` preview sleep it between markets so a same-tz batch isn't simultaneous.
 (2) **Retry** — `KalshiClient._get_with_retry` retries 429/5xx with a `Retry-After`-aware backoff
-(4 attempts) and only then raises. The retry is load-bearing: `fetch_event` is **unauthenticated**
+(6 attempts, ~9.5 s window) and only then raises. The retry is load-bearing: `fetch_event` is **unauthenticated**
 (`self._http.get`, not signed), so the read-only-auth tier does **not** apply to it — the read shares
 Kalshi's low per-IP tier with the always-on logger, and the stagger alone left **15/20 preflight reads
 still 429'ing at 0.5 s**. With the retry, 429 → wait → retry → success: restart logs are clean and a

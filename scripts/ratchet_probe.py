@@ -33,10 +33,16 @@ import math
 import re
 import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 WEATHER_GOV = "https://api.weather.gov"
+IEM_ASOS = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+# Kalshi daily-high settles on the LOCAL calendar day, so the running max must be over LOCAL-day obs.
+# Using the UTC day leaks the prior local evening (e.g. 00:53Z = 7:53pm CT yesterday) and spuriously
+# "kills" low buckets at day-start -> a false short EDGE. Map station -> its local tz.
+STATION_TZ = {"KMDW": "America/Chicago"}      # CHI; extend per station as the probe widens
 UA = {"User-Agent": "weather-alpha-ratchet-probe/1.0 (research)", "Accept": "application/geo+json"}
 
 
@@ -55,6 +61,35 @@ def fetch_obs(station: str, day: str, limit: int = 500) -> list[tuple[datetime, 
         if t.strftime("%Y-%m-%d") != day:
             continue
         out.append((t, tv * 9.0 / 5.0 + 32.0))  # api.weather.gov temp is degC
+    return sorted(out)
+
+
+def fetch_obs_iem(station: str, day: str) -> list[tuple[datetime, float]]:
+    """[(utc_ts, temp_F)] from IEM ASOS (historical, METAR hourly+special; lags ~24-48h so it
+    covers days weather.gov has already aged out). `tmpf` is ALREADY °F (no degC conversion)."""
+    d0 = datetime.strptime(day, "%Y-%m-%d")
+    d1 = d0 + timedelta(days=1)
+    st = station[1:] if (len(station) == 4 and station.startswith("K")) else station   # KMDW -> MDW
+    q = (f"{IEM_ASOS}?station={st}&data=tmpf&tz=Etc/UTC&format=onlycomma&latlon=no"
+         f"&missing=M&trace=T&direct=no&year1={d0.year}&month1={d0.month}&day1={d0.day}"
+         f"&year2={d1.year}&month2={d1.month}&day2={d1.day}")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(q, headers={"User-Agent": UA["User-Agent"]}), timeout=40) as r:
+            txt = r.read().decode("utf-8", "replace")
+    except Exception:
+        return []
+    out = []
+    for line in txt.splitlines()[1:]:                                # skip header station,valid,tmpf
+        p = line.split(",")
+        if len(p) < 3 or p[2].strip() in ("", "M"):
+            continue
+        try:
+            t = datetime.strptime(p[1].strip(), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            f = float(p[2])
+        except ValueError:
+            continue
+        if t.strftime("%Y-%m-%d") == day:
+            out.append((t, f))
     return sorted(out)
 
 
@@ -114,11 +149,21 @@ def running_max_at(obs: list[tuple[datetime, float]], t: datetime) -> float | No
 
 def analyze(station: str, book_dir: Path, day: str):
     obs = fetch_obs(station, day)
+    src = "weather.gov"
+    if not obs:                                       # older days have aged out of weather.gov -> IEM
+        obs = fetch_obs_iem(station, day); src = "IEM-ASOS"
     if not obs:
-        print(f"!! no obs for {station} on {day} (api.weather.gov)")
+        print(f"!! no obs for {station} on {day} (weather.gov + IEM)")
+        return
+    # Restrict to the LOCAL calendar day (the Kalshi settlement day) so the running max can't be
+    # contaminated by the prior local evening's temps that fall in the early-UTC hours.
+    tz = ZoneInfo(STATION_TZ.get(station, "America/Chicago"))
+    obs = [(t, f) for (t, f) in obs if t.astimezone(tz).strftime("%Y-%m-%d") == day]
+    if not obs:
+        print(f"!! no {station} obs on local day {day} (src={src})")
         return
     day_max = max(round(f) for _, f in obs)
-    print(f"== {station} {day} ==  obs={len(obs)}  "
+    print(f"== {station} {day} ==  src={src}  obs={len(obs)}  "
           f"first={obs[0][0].strftime('%H:%MZ')} {obs[0][1]:.0f}F  "
           f"last={obs[-1][0].strftime('%H:%MZ')} {obs[-1][1]:.0f}F  running-max-so-far={day_max}F")
     print("  (note: if last obs is pre-afternoon, the day's true peak is still ahead)\n")

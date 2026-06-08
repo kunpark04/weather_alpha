@@ -5,6 +5,45 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L16 — Harden EVERY external-call path, not just the obvious one; and a doc that says "spaced/retried" must point at code that does it (recurrence of L4)
+
+**Context.** The user asked whether the live/paper bots had traded and whether there was an
+error. PAPER had traded (26 legs); LIVE had not (Chicago-only, every day's wing failed the
+`max_ask_sum < 0.90` affordability gate — correct, not a bug). The real error: on 2026-06-06 the
+PAPER bot logged 7 `❌ cycle failed` lines. The traceback (`logs/paper/weather_alpha.log`) was
+**`httpx.HTTPStatusError: 429 Too Many Requests`** on `GET /markets?event_ticker=…` inside
+`kalshi.fetch_event` — Kalshi rate-limited the **read** path when every same-tz city fired its
+`fetch_event` in the same second at the top of the 1 PM anchor window.
+
+**Two mistakes it exposed.**
+1. **Asymmetric hardening.** Commit `1bcf1f7` added 429/throttle retry+backoff to the
+   *order-placement* path only. `fetch_event` (the public read every cycle makes for every city)
+   had **no** retry and **no** 429 handling — so the most-frequent external call was the least
+   protected. Recovery relied entirely on the coarse ~5-min cycle retry.
+2. **Doc claimed a guarantee the code didn't enforce (L4 again).** HANDOFF §1.6 said trade cycles
+   "iterate markets sequentially (spaced) so they don't 429" and that the preflight burst was "the
+   only residual." Neither was true: `run_cycle`'s loop had **no** inter-market delay, and the
+   trade cycle itself 429'd. The "higher auth tier" was assumed sufficient; it wasn't (the
+   orderbook logger shares the droplet IP).
+
+**Fix.** Added `scheduler.inter_market_stagger_seconds` (default 0.0; 0.5 in the resident
+`live.yaml`/`paper.yaml`); `run_cycle` sleeps it between markets so a same-tz batch is spread under
+the limit. Corrected the HANDOFF passage to match the code. (`fetch_event` still lacks a per-call
+429 retry — flagged in HANDOFF as the read-path follow-up if the stagger proves insufficient.)
+
+**Rules.**
+- When you add resilience (retry/backoff/rate-limit handling) to one external call, **audit the
+  sibling calls** — especially read paths that run far more often than the write path you just
+  fixed. Resilience asymmetry is a latent outage.
+- A burst is per-**process+IP**, not per-call: count *every* concurrent caller (here: bot fan-out
+  + the always-on logger on the same host) before declaring a rate-limit headroom "enough."
+- **Verify a documented guarantee against the code that enforces it** before trusting it (L4). If
+  HANDOFF says "spaced"/"retried"/"isolated", grep for the sleep/retry/try — don't assume.
+- Read the actual traceback (`logs/<mode>/weather_alpha.log`), not just the operator one-liner
+  (`❌ cycle failed (see logs)`), before judging severity. The one-liner hid a benign-but-real 429.
+
+---
+
 ## L15 — A maker (passive) fill is adversely selected — "post at the bid" is not free spread; and read the data you HAVE before deciding you must wait for new data
 
 **Problem.** The realistic-fill work showed the limit-at-ask *taker* spread eats the edge for 19/20

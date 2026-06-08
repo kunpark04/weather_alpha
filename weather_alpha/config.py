@@ -119,6 +119,12 @@ class SchedulerCfg:
     anchor_grace_minutes: int
     data_refresh_minutes: int
     predict_lookback_hours: int
+    # Seconds to wait between consecutive markets within one run_cycle fan-out. Cities that share
+    # a 1 PM local anchor (e.g. every Eastern city) are traded back-to-back, each opening with a
+    # Kalshi market-data GET; firing them simultaneously bursts the public endpoint and trips a
+    # 429 (observed 2026-06-06). A small stagger spreads the reads under the rate limit. 0 = off
+    # (legacy / single-market, where it is a no-op anyway). Only the first city fires at t0.
+    inter_market_stagger_seconds: float = 0.0
 
 
 @dataclass(frozen=True)

@@ -119,7 +119,16 @@ async def run_cycle(
 
     results: list[CycleResult] = []
     total_realized = 0
-    for market in target_markets:
+    # Pace the per-market Kalshi reads. Cities sharing a 1 PM local anchor (e.g. every Eastern
+    # city) arrive here as ONE batch, and each market opens with a fetch_event GET; firing them
+    # back-to-back bursts Kalshi's public market-data endpoint and trips a 429 (observed
+    # 2026-06-06: PHIL/DC/BOS lost a cycle, recovering only on the next tick). A small
+    # inter-market delay spreads the reads under the rate limit — negligible vs the 60-min
+    # post-anchor window, and only the first city fires at t0.
+    stagger_s = cfg.scheduler.inter_market_stagger_seconds
+    for i, market in enumerate(target_markets):
+        if i and stagger_s > 0:
+            await asyncio.sleep(stagger_s)
         try:
             r = await _run_one_market(cfg, market, art, book, kalshi,
                                       bundle=bundle, force_anchor=force_anchor, budget=budget,

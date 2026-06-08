@@ -222,8 +222,15 @@ config changes — all 20 were already correct.
 bot and the logger both authenticate the read-WRITE key used **read-only** (`main.py` authenticates a
 paper read path when `KALSHI_KEY_ID` is in the env — SAFE: paper never calls `place_order`, guarded by
 `is_live()` in `execution.py`; the key only buys the higher Kalshi rate-limit tier). Trade cycles
-iterate markets sequentially (spaced) so they don't 429; the only residual is the startup preflight's
-20-call burst (cosmetic — a try/excepted preview, no trade/data impact). Deploy units carry an optional
+space the per-city reads via `scheduler.inter_market_stagger_seconds` (0.5 s; `run_cycle` sleeps
+between markets) so a same-tz batch doesn't 429. **Added 2026-06-07** after the read path actually
+429'd on 2026-06-06: a `fetch_event` GET burst at the top of the ET/CT anchor windows tripped
+`httpx 429` on PHIL/DC/BOS (HOU×3, BOS×2), each isolated per-market and recovered only on the next
+~5-min cycle tick. The higher auth tier alone wasn't enough under the simultaneous burst (+ the
+orderbook logger sharing the droplet IP). Note `fetch_event` still has **no** per-call 429
+retry/backoff — only the *order-placement* path does (commit `1bcf1f7`, 400 invalid_parameters); the
+stagger is the read-path mitigation. The startup preflight's 20-call burst is the one remaining
+unspaced read (cosmetic — a try/excepted preview, no trade/data impact). Deploy units carry an optional
 read-only `EnvironmentFile` (`deploy/weather-alpha-paper.service`, `deploy/orderbook-logger-user.service`).
 
 ---

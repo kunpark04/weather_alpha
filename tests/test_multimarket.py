@@ -8,6 +8,7 @@ needed.  Run:  pytest tests/test_multimarket.py     (or: python tests/test_multi
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import sys
 import tempfile
@@ -251,6 +252,50 @@ def test_run_cycle_loops_markets_per_market_results():
     results = asyncio.run(engine.run_cycle(cfg, None, Book(), _MockKalshi()))
     assert [r.diagnostics["market"] for r in results] == ["CHI", "NYC"]
     assert all(r.execution.fills == 0 for r in results)                      # no contracts -> event guard
+
+
+def test_scheduler_stagger_default_off_and_paper_config_on():
+    # The knob defaults to OFF (legacy / single-market no-op) when a config omits it...
+    assert load_config(_write_cfg([_CHI])).scheduler.inter_market_stagger_seconds == 0.0
+    # ...and the deployed 20-city PAPER bot turns it on, so the 429 fix is actually wired in.
+    assert load_config(str(_ROOT / "config" / "paper.yaml")).scheduler.inter_market_stagger_seconds == 0.5
+
+
+def test_run_cycle_staggers_market_fanout():
+    # 429 FIX: cities sharing a 1 PM anchor are one batch; run_cycle must space their Kalshi reads
+    # with one inter-market sleep BEFORE every market except the first (the first fires at t0).
+    cfg = load_config(_write_cfg([_CHI, _NYC, _LAX]))
+    cfg = dataclasses.replace(
+        cfg, scheduler=dataclasses.replace(cfg.scheduler, inter_market_stagger_seconds=0.01))
+    sleeps: list[float] = []
+    real_sleep = engine.asyncio.sleep
+    async def _record(s):                       # capture the stagger calls, don't actually wait
+        sleeps.append(s)
+        await real_sleep(0)
+    engine.asyncio.sleep = _record
+    try:
+        results = asyncio.run(engine.run_cycle(cfg, None, Book(), _MockKalshi()))
+    finally:
+        engine.asyncio.sleep = real_sleep
+    assert [r.diagnostics["market"] for r in results] == ["CHI", "NYC", "LAX"]   # order preserved
+    assert sleeps == [0.01, 0.01], sleeps       # 3 markets -> 2 staggers, none before the first
+
+
+def test_run_cycle_no_stagger_when_disabled():
+    # With the knob at 0 (default), the loop adds no sleeps — pure back-compat for the legacy path.
+    cfg = load_config(_write_cfg([_CHI, _NYC]))
+    assert cfg.scheduler.inter_market_stagger_seconds == 0.0
+    sleeps: list[float] = []
+    real_sleep = engine.asyncio.sleep
+    async def _record(s):
+        sleeps.append(s)
+        await real_sleep(0)
+    engine.asyncio.sleep = _record
+    try:
+        asyncio.run(engine.run_cycle(cfg, None, Book(), _MockKalshi()))
+    finally:
+        engine.asyncio.sleep = real_sleep
+    assert sleeps == [], sleeps
 
 
 def test_run_cycle_honors_halt():

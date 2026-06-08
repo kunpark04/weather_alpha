@@ -4,6 +4,14 @@ The logger (`scripts/orderbook_logger.py`) must run on an **always-on host**. It
 **cannot** survive your laptop shutting down — code can't fix a powered-off machine.
 Run it on a cheap/free 24/7 box and let `systemd` keep it alive.
 
+> **Actual production droplet:** `weather-alpha@137.184.128.37` (DigitalOcean NYC1, Ubuntu 24.04,
+> 1 vCPU / 1 GB). The home dir **is** the project (flat layout: `~` = repo root), checked out as a
+> **lean sparse + `--filter=blob:none` partial** clone — only `weather_alpha config scripts deploy`,
+> **never the full repo** (no notebooks/historical/archive/model artifacts; `tasks/lessons.md` L20).
+> Migrated from user `fa` → `weather-alpha` on 2026-06-08 (`deploy/migrate-to-weather-alpha.md`). The
+> generic recipes below use **illustrative** users/paths (`fa` no longer exists; `/opt/weather-alpha`,
+> `~/weather-alpha` are examples) — adapt them to the flat `weather-alpha@host` reality above.
+
 ## Why it stopped before
 Two usual causes, both fixed here:
 1. **No supervisor** — if the process crashed (or the terminal/SSH session closed),
@@ -25,8 +33,8 @@ continuous logger.
 ## Setup (Linux)
 ```bash
 # 1. provision a small Linux VM; then on it:
-sudo useradd -r -m -d /opt/weather-alpha fa            # service user
-sudo mkdir -p /opt/weather-alpha && sudo chown fa /opt/weather-alpha
+sudo useradd -r -m -d /opt/weather-alpha weather-alpha   # service user
+sudo mkdir -p /opt/weather-alpha && sudo chown weather-alpha /opt/weather-alpha
 # 2. copy the logger (just the one file is enough — stdlib only):
 scp scripts/orderbook_logger.py  user@vm:/opt/weather-alpha/scripts/
 # 3. python3 is preinstalled on most distros; tzdata is native on Linux.
@@ -65,34 +73,37 @@ morning — the local copy runs ~1 day behind by design, and a missed run self-h
 
 Prereq: passwordless SSH from your machine to the host (key-based; for an unattended job the
 key must have no passphrase or live in an agent). Set the host via the `OB_HOST` env var (or
-edit the config block atop the script). `OB_REMOTE_DIR` defaults to
-`projects/weather-alpha/data/orderbook` (your clone path on the host); `OB_LOCAL_DIR`
+edit the config block atop the script). `OB_REMOTE_DIR` defaults to `data/orderbook`
+(home-relative — the droplet's flat layout; was `projects/weather-alpha/data/orderbook`); `OB_LOCAL_DIR`
 defaults to `~/weather-alpha-data/orderbook`.
 
 **Windows analysis box** — `scripts/pull-orderbook-zips.ps1` (native ssh/scp, no rsync):
 ```powershell
-$env:OB_HOST = 'fa@your-logger-host'; $env:OB_MOVE = '1'   # OB_MOVE=1 -> delete host copy after verifying locally
+$env:OB_HOST = 'weather-alpha@your-logger-host'; $env:OB_MOVE = '1'   # OB_MOVE=1 -> delete host copy after verifying locally
 pwsh -NoProfile -File scripts\pull-orderbook-zips.ps1                 # test once
-# then a daily Scheduled Task (StartWhenAvailable catches up if the PC was asleep):
+# then a daily Scheduled Task. GOTCHA: Task Scheduler can't resolve a bare 'pwsh.exe' (-> 0x80070002
+# FILE_NOT_FOUND), so use the STABLE WindowsApps app-alias path (versioned paths change every PS update).
+$pwsh = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'; if(-not(Test-Path $pwsh)){$pwsh=(Get-Command pwsh).Source}
 $ps1 = (Resolve-Path scripts\pull-orderbook-zips.ps1).Path
-$act = New-ScheduledTaskAction  -Execute 'pwsh.exe' -Argument "-NoProfile -File `"$ps1`""
+$act = New-ScheduledTaskAction  -Execute $pwsh -Argument "-NoProfile -File `"$ps1`"" -WorkingDirectory (Resolve-Path .).Path
 $trg = New-ScheduledTaskTrigger -Daily -At 8am
-$set = New-ScheduledTaskSettingsSet -StartWhenAvailable
-[Environment]::SetEnvironmentVariable('OB_HOST','fa@your-logger-host','User')   # persist for the task
+# Laptop-friendly: wake to run; catch up on next wake if off/asleep; don't skip on battery.
+$set = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+[Environment]::SetEnvironmentVariable('OB_HOST','weather-alpha@your-logger-host','User')   # persist for the task
 [Environment]::SetEnvironmentVariable('OB_MOVE','1','User')
-Register-ScheduledTask -TaskName 'PullOrderbookZips' -Action $act -Trigger $trg -Settings $set
+Register-ScheduledTask -TaskName 'PullOrderbookZips' -Action $act -Trigger $trg -Settings $set -Force
 ```
 
 **Linux / macOS analysis box** — `scripts/pull-orderbook-zips.sh` (rsync):
 ```bash
-OB_HOST=fa@your-logger-host OB_MOVE=1 bash scripts/pull-orderbook-zips.sh   # test once
+OB_HOST=weather-alpha@your-logger-host OB_MOVE=1 bash scripts/pull-orderbook-zips.sh   # test once
 crontab -e        # then add a daily pull (move-mode; a missed run self-heals):
-# 0 8 * * *  OB_HOST=fa@your-logger-host OB_MOVE=1 /path/to/scripts/pull-orderbook-zips.sh >> ~/.cache/ob-pull.log 2>&1
+# 0 8 * * *  OB_HOST=weather-alpha@your-logger-host OB_MOVE=1 /path/to/scripts/pull-orderbook-zips.sh >> ~/.cache/ob-pull.log 2>&1
 ```
 
 Drop `OB_MOVE` to fall back to copy-mode (host keeps every zip). In copy-mode, if the host's
 disk later gets tight, prune already-pulled zips on the host with e.g.
-`find ~/projects/weather-alpha/data/orderbook -name '*.zip' -mtime +30 -delete`.
+`find ~/data/orderbook -name '*.zip' -mtime +30 -delete`.
 
 ## Pull bot state — live_log history + positions snapshot (scheduled)
 The forward-edge tracker (`scripts/forward_edge_tracker.py`, HANDOFF §1.7) reads
@@ -121,7 +132,7 @@ add `-WakeToRun` to the settings + enable wake timers in the power plan; usually
 catch-up-on-wake covers it.)
 
 Prereq: the same passwordless SSH key the zip pull uses. Host via `WA_HOST` (falls back to `OB_HOST`);
-`WA_REMOTE_PROJ` defaults to `projects/weather-alpha`, `WA_LOCAL_DATA` to the repo's `data/`.
+`WA_REMOTE_PROJ` defaults to `.` (= remote `$HOME`; flat layout), `WA_LOCAL_DATA` to the repo's `data/`.
 
 **Raw market-data location.** Only the **orderbook depth** (raw weather *market* data — the bulk) is
 relocated off the repo, via the `OB_LOCAL_DIR` User env var (the zip-pull task inherits it at run
@@ -132,7 +143,7 @@ time). **This machine** points it at `..\data\weather\orderbook`. The **bot logs
 also stays — `load_city` hardcodes the repo path.)
 
 ```powershell
-$env:WA_HOST = 'fa@137.184.128.37'
+$env:WA_HOST = 'weather-alpha@137.184.128.37'
 pwsh -NoProfile -File scripts\pull-state.ps1            # test once (rotates+pulls, merges into data\)
 # then a daily Scheduled Task. GOTCHAS (both bite): Task Scheduler can't resolve a bare 'pwsh.exe'
 # (-> 0x80070002 FILE_NOT_FOUND), and the WindowsApps *versioned* path changes on every PS update --
@@ -142,7 +153,7 @@ $pwsh = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'   # stable 
 if (-not (Test-Path $pwsh)) { $pwsh = (Get-Command pwsh).Source }      # MSI-install fallback (C:\Program Files\PowerShell\7)
 $ps1  = (Resolve-Path scripts\pull-state.ps1).Path
 $repo = (Resolve-Path .).Path
-[Environment]::SetEnvironmentVariable('WA_HOST','fa@137.184.128.37','User')
+[Environment]::SetEnvironmentVariable('WA_HOST','weather-alpha@137.184.128.37','User')
 [Environment]::SetEnvironmentVariable('WA_PYTHON',(Get-Command python).Source,'User')
 $act = New-ScheduledTaskAction  -Execute $pwsh -Argument "-NoProfile -File `"$ps1`"" -WorkingDirectory $repo
 $trg = New-ScheduledTaskTrigger -Daily -At 8:10am
@@ -173,7 +184,7 @@ lean-droplet convention). Tune with `TAPE_DAYS` (default 7) / `TAPE_SERIES` (def
 tape **accumulates**; only the droplet side is pruned.
 
 ```powershell
-$env:WA_HOST = 'fa@137.184.128.37'
+$env:WA_HOST = 'weather-alpha@137.184.128.37'
 pwsh -NoProfile -File scripts\refresh-truth-tape.ps1            # test (TAPE_SERIES/TAPE_DAYS to scope)
 # daily Scheduled Task (stable pwsh alias; laptop-friendly), AFTER the 8:00/8:10 pulls:
 $pwsh = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'; if(-not(Test-Path $pwsh)){$pwsh=(Get-Command pwsh).Source}
@@ -203,9 +214,9 @@ run trades today's wing, settles yesterday's position, then exits.
 ```bash
 # get the code into /opt/weather-alpha (clone, or `git pull` if already there), then:
 cd /opt/weather-alpha
-sudo -u fa python3 -m venv .venv
-sudo -u fa .venv/bin/pip install -e .        # BASE deps only — NOT .[data] (no HRRR needed)
-sudo -u fa sed -i 's/^mode: paper/mode: live/' config/weather_alpha.yaml
+sudo -u weather-alpha python3 -m venv .venv
+sudo -u weather-alpha .venv/bin/pip install -e .        # BASE deps only — NOT .[data] (no HRRR needed)
+sudo -u weather-alpha sed -i 's/^mode: paper/mode: live/' config/weather_alpha.yaml
 ```
 No `data/model_v3_artifacts/` and no weather parquets are required — model-free pulls only
 the CLI daily-high, on demand, when settling a prior day.
@@ -223,7 +234,7 @@ sudo tee /opt/weather-alpha/secrets/kalshi.env >/dev/null <<'EOF'
 KALSHI_KEY_ID=<your read-write key id>
 KALSHI_PRIVATE_KEY_PATH=/opt/weather-alpha/secrets/kalshi-rw.pem
 EOF
-sudo chown -R fa /opt/weather-alpha/secrets
+sudo chown -R weather-alpha /opt/weather-alpha/secrets
 sudo chmod 600 /opt/weather-alpha/secrets/kalshi.env /opt/weather-alpha/secrets/kalshi-rw.pem
 ```
 Your **read-only** key is reserved for the monitor (built later): it gets its own

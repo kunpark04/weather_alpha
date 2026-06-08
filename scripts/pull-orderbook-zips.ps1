@@ -27,11 +27,11 @@
 #>
 $ErrorActionPreference = 'Stop'
 
-$RemoteHost = if ($env:OB_HOST)       { $env:OB_HOST }       else { throw 'set OB_HOST, e.g. fa@your-logger-host (or an ssh config alias)' }
-$RemoteDir  = if ($env:OB_REMOTE_DIR) { $env:OB_REMOTE_DIR } else { 'projects/weather-alpha/data/orderbook' }  # path on host (rel = from $HOME)
+$RemoteHost = if ($env:OB_HOST)       { $env:OB_HOST }       else { throw 'set OB_HOST, e.g. weather-alpha@your-logger-host (or an ssh config alias)' }
+$RemoteDir  = if ($env:OB_REMOTE_DIR) { $env:OB_REMOTE_DIR } else { 'data/orderbook' }  # path on host (rel = from $HOME; flat layout)
 $LocalDir   = if ($env:OB_LOCAL_DIR)  { $env:OB_LOCAL_DIR }  else { Join-Path $HOME 'weather-alpha-data\orderbook' }
 $Move       = [bool]$env:OB_MOVE
-$RemoteTar  = '.ob-pull.tar.gz'                              # temp archive in the host's $HOME
+$RemoteTar  = '.ob-pull.tar.gz'                              # temp archive INSIDE $RemoteDir (never the host $HOME)
 
 # Explicitly DISABLE multiplexing: Windows OpenSSH can't do ControlMaster, and a stray ControlMaster
 # block in ~/.ssh/config will otherwise break every connection ("Connection closed"). BatchMode so a
@@ -62,11 +62,11 @@ $needed = @($remote.Keys | Where-Object { -not (Test-LocalGood $_ $remote[$_]) }
 # 2+3) tar the needed zips on the host into ONE archive, pull it, extract — one ssh + one scp.
 if ($needed.Count -gt 0) {
     $fileArgs = ($needed | ForEach-Object { "'$_'" }) -join ' '
-    Invoke-Ssh "cd '$RemoteDir' && tar czf ~/'$RemoteTar' $fileArgs" | Out-Null
+    Invoke-Ssh "cd '$RemoteDir' && tar czf '$RemoteTar' $fileArgs" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "remote tar failed (exit $LASTEXITCODE)" }
 
     $localTar = Join-Path ([IO.Path]::GetTempPath()) 'ob-pull.tar.gz'
-    scp @SshOpt -q "${RemoteHost}:$RemoteTar" $localTar
+    scp @SshOpt -q "${RemoteHost}:$RemoteDir/$RemoteTar" $localTar
     if ($LASTEXITCODE -ne 0) { throw "scp of archive failed (exit $LASTEXITCODE)" }
 
     New-Item -ItemType Directory -Force -Path $LocalDir | Out-Null
@@ -85,7 +85,7 @@ foreach ($r in $remote.Keys) { if ($r -notin $verified) { Write-Warning "size mi
 # delete on host: verified zips (MOVE mode only) + always the temp archive if we made one — one ssh.
 $targets = @()
 if ($Move)              { $targets += ($verified | ForEach-Object { "'$RemoteDir/$_'" }) }
-if ($needed.Count -gt 0){ $targets += "~/'$RemoteTar'" }
+if ($needed.Count -gt 0){ $targets += "'$RemoteDir/$RemoteTar'" }
 if ($targets.Count -gt 0) {
     Invoke-Ssh ("rm -f " + ($targets -join ' ')) | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Warning "remote cleanup rm exited $LASTEXITCODE" }

@@ -19,8 +19,8 @@
 # no passphrase or live in an ssh-agent). Configure via the vars below or env overrides.
 set -euo pipefail
 
-HOST="${OB_HOST:?set OB_HOST, e.g. fa@your-logger-host (or an ~/.ssh/config alias)}"
-REMOTE_DIR="${OB_REMOTE_DIR:-projects/weather-alpha/data/orderbook}"   # path on the host (rel = from $HOME)
+HOST="${OB_HOST:?set OB_HOST, e.g. weather-alpha@your-logger-host (or an ~/.ssh/config alias)}"
+REMOTE_DIR="${OB_REMOTE_DIR:-data/orderbook}"   # path on the host (rel = from $HOME; flat layout)
 LOCAL_DIR="${OB_LOCAL_DIR:-$HOME/weather-alpha-data/orderbook}"        # where to land them here
 
 mkdir -p "$LOCAL_DIR"

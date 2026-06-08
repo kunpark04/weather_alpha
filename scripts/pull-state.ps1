@@ -25,13 +25,13 @@
   nothing is deleted until verified here. Register with -StartWhenAvailable to catch up on next wake
   (deploy/README.md -> "Pull bot state").
 
-  Config: WA_HOST (or OB_HOST), WA_REMOTE_PROJ (default projects/weather-alpha), WA_MODES
+  Config: WA_HOST (or OB_HOST), WA_REMOTE_PROJ (default '.' = remote $HOME, flat layout), WA_MODES
   (default "paper live"), WA_LOCAL_DATA (default repo data/). Needs passwordless key SSH.
 #>
 $ErrorActionPreference = 'Stop'
 
-$RemoteHost = if ($env:WA_HOST) { $env:WA_HOST } elseif ($env:OB_HOST) { $env:OB_HOST } else { throw 'set WA_HOST (or OB_HOST), e.g. fa@137.184.128.37 or an ssh config alias' }
-$RemoteProj = if ($env:WA_REMOTE_PROJ) { $env:WA_REMOTE_PROJ } else { 'projects/weather-alpha' }
+$RemoteHost = if ($env:WA_HOST) { $env:WA_HOST } elseif ($env:OB_HOST) { $env:OB_HOST } else { throw 'set WA_HOST (or OB_HOST), e.g. weather-alpha@137.184.128.37 or an ssh config alias' }
+$RemoteProj = if ($env:WA_REMOTE_PROJ) { $env:WA_REMOTE_PROJ } else { '.' }                              # flat layout: project IS remote $HOME
 $Modes      = if ($env:WA_MODES)       { $env:WA_MODES }       else { 'paper live' }                    # space-separated
 $LocalData  = if ($env:WA_LOCAL_DATA)  { $env:WA_LOCAL_DATA }  else { (Resolve-Path (Join-Path $PSScriptRoot '..\data')).Path }
 $Inbox      = Join-Path $LocalData 'state_inbox'
@@ -46,7 +46,7 @@ $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 #    live_log -> dated shard and snapshot positions.json into a shared staging dir (files tagged
 #    "<mode>__<name>"); tar the staging dir; list staged files (name<TAB>size). Bash uses only
 #    double quotes + $(...), kept inside a PS single-quoted template so PowerShell never touches it.
-$tmpl = 'cd "__PROJ__" && mkdir -p data/.state-pull && for m in __MODES__; do if [ -s data/$m/live_log.parquet ]; then mv -f data/$m/live_log.parquet data/.state-pull/${m}__live_log-__STAMP__.parquet; fi; if [ -s data/$m/positions.json ]; then cp -f data/$m/positions.json data/.state-pull/${m}__positions.json; fi; done; cd data/.state-pull && { if [ -n "$(ls -A)" ]; then tar czf ~/__TAR__ .; fi; } ; find . -maxdepth 1 -type f ! -name "*.tar.gz" -printf "%P\t%s\n"'
+$tmpl = 'cd "__PROJ__" && mkdir -p data/.state-pull && for m in __MODES__; do if [ -s data/$m/live_log.parquet ]; then mv -f data/$m/live_log.parquet data/.state-pull/${m}__live_log-__STAMP__.parquet; fi; if [ -s data/$m/positions.json ]; then cp -f data/$m/positions.json data/.state-pull/${m}__positions.json; fi; done; cd data/.state-pull && { if [ -n "$(ls -A)" ]; then tar czf ../__TAR__ .; fi; } ; find . -maxdepth 1 -type f ! -name "*.tar.gz" -printf "%P\t%s\n"'
 $cmd = $tmpl.Replace('__PROJ__', $RemoteProj).Replace('__MODES__', $Modes).Replace('__STAMP__', $stamp).Replace('__TAR__', $RemoteTar)
 
 $listing = Invoke-Ssh $cmd
@@ -62,7 +62,7 @@ if ($staged.Count -eq 0) { Write-Host "nothing staged on the droplet for modes [
 
 # 2) ONE scp: pull the tar; extract to a temp dir.
 $localTar = Join-Path ([IO.Path]::GetTempPath()) 'wa-state-pull.tar.gz'
-scp @SshOpt -q "${RemoteHost}:$RemoteTar" $localTar
+scp @SshOpt -q "${RemoteHost}:$RemoteProj/data/$RemoteTar" $localTar
 if ($LASTEXITCODE -ne 0) { throw "scp of state archive failed (exit $LASTEXITCODE)" }
 $exDir = Join-Path ([IO.Path]::GetTempPath()) ("wa-state-" + $stamp)
 New-Item -ItemType Directory -Force -Path $exDir | Out-Null
@@ -94,7 +94,7 @@ foreach ($name in $staged.Keys) {
 
 # 4) ONE ssh: delete the VERIFIED staged files from the droplet's staging dir (+ the temp tar). The LIVE
 #    data/<mode>/positions.json and the freshly-recreated data/<mode>/live_log.parquet are untouched.
-$rm = @("~/'$RemoteTar'")
+$rm = @("'$RemoteProj/data/$RemoteTar'")
 foreach ($name in $verified) { $rm += "'$RemoteProj/data/.state-pull/$name'" }
 Invoke-Ssh ("rm -f " + ($rm -join ' ')) | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Warning "remote cleanup rm exited $LASTEXITCODE (will retry next run)" }

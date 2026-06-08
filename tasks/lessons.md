@@ -5,6 +5,29 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L20 — The droplet carries a sparse + partial checkout, NEVER the full repo
+
+**Context.** After flattening the droplet (user `fa` → `weather-alpha`, home = project), the user set a
+standing rule: *"Only pull what is necessary for the logger in droplet (never pull/clone entire repo)."*
+The `rsync` rebuild carried only fa's existing **sparse-checkout** (cone: `weather_alpha config scripts
+deploy`) of a **partial clone** (`--filter=blob:none`, `.git` = 1.3M) — no `notebooks/`, `historical/`,
+`archive/`, `docs/`, or model artifacts. The 897M home is `.venv` (564M) + live `data` (193M), not code.
+
+**Rule.** Any code on the droplet is a **partial (`--filter=blob:none`) + sparse-checkout** of the
+**runtime-only** paths (`weather_alpha`, `config`, `scripts`; `deploy` optional, for unit reinstalls) —
+never `git clone`/`git pull` of the whole tree (which would drag the notebooks, 3.4-yr deep-history study,
+archive, and model artifacts the **model-free** bot never loads). The droplet has **no GitHub key** today,
+so it can't fetch at all — the safest default for this rule; if pull capability is ever needed, wire a
+sparse + `--filter=blob:none` fetch of the named paths, not a clone. Code-side sibling of the lean-data
+rule [[L19]].
+
+**Why it matters.** A full clone on a 24G/1GB box wastes disk + bandwidth and pulls research/data the
+production path never touches; it also widens the exposure surface on a box that holds the live RW key.
+Lean checkout = faster, cheaper, smaller blast radius, consistent with the per-user write boundary the
+migration established.
+
+---
+
 ## L19 — Relocate exactly what was asked; don't bundle adjacent data the user didn't name (scope-creep on infra ops)
 
 **Context.** Asked to move the **raw weather market data** out to `..\data\weather` "with the logger data",

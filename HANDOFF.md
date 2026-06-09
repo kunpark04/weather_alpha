@@ -43,7 +43,9 @@ the orderbook zips — see §7 `DEPLOY`.
 > less than losing legs in 14/20 cities), so it can't capture the spread — for Chicago maker is
 > strictly worse than taking. PAPER now shadows **all 20** cities, the logger logs **all 20** series
 > (both read-only-authenticated), and all 20 settlement stations are **verified vs Kalshi's own
-> rules**. Details: **§1.6**.
+> rules**. Details: **§1.6**. **Forward-confirmed (paper, 2026-06-09):** the 20-city wing ran
+> net **−$9.42** and latched its 50% account halt — the bleed is entirely the 19 non-Chicago
+> cities (Chicago never fired) — the live forward-OOS confirmation of "only Chicago"; **§1.8**.
 
 | Item | Value |
 |---|---|
@@ -290,6 +292,51 @@ stale and no forward-edge rollup exists (a forward-tracking harness is the open 
 
 ---
 
+### 1.8 Paper shadow forward-OOS — 20-city wing confirmed negative off-Chicago; 50% breaker latched (2026-06-09)
+
+First local read of the resident **paper Book** (the FWD-TRACK sync now resolves §1.7's "stale local
+persistence" caveat — `data/paper/positions.json` is current). It shows the paper bot **account-halted at
+realized −$9.42**, and `scripts/diagnose_paper.py` (joins the Book to the `data/backfill` settlement tape)
+nails why — **no code bug, structural negative edge:**
+
+| paper cohorts (13 settled, all NON-Chicago) | n | avg P/L | total |
+|---|--:|--:|--:|
+| **cover** (a wing leg won) | 8 (62%) | +$0.26 | +$2.10 |
+| **miss** (high outside the 2-leg wing) | 5 (38%) | −$2.30 | −$11.52 |
+| **EV / cohort** | 13 | **−$0.72** | **−$9.42** |
+
+The cheap 2-leg wing wins ~a quarter when right but loses ~the full $2.50 when wrong; 62% coverage can't
+pay for that. **Chicago never fired** (wing too expensive every day — the same gate as LIVE, §FWD-TRACK),
+so the entire bleed is the **other 19 cities = the no-edge universe of §1.6** → the live forward-OOS
+confirmation that "only Chicago has a durable edge."
+
+**`drop_lower_ask` does not generalize off-Chicago.** In **4 of the 5 misses the winning bucket was the
+exact leg `drop_lower_ask` discarded** (the cheap adjacent); the full 3-leg wing would have covered 12/13
+(the 5th, DAL 6/7, was a +2-bucket tail blow-out the 3-leg misses too). On Chicago the placebo
+`drop_higher_ask` failed (−$431, §1.3) so dropping the lower-ask leg was right; off-Chicago it dropped the
+winner. **Caveats:** N=5; and re-adding the 3rd leg pays an extra leg on *every* cohort — a backtest
+question, not a confirmed fix.
+
+**The 50% account breaker is correct, not a degenerate artifact.** `account_hwm=0`/`bankroll=null` look
+wrong but aren't — realized peaked at $0 at inception and only fell, so drawdown is measured from 0. The
+latch reconstruction matches the Book to the cent: it trips on the 2026-06-08 settlement sweep when
+drawdown **$9.42 ≥ 50% of the running $15.58 balance** ($25 + realized). Latched until
+`scripts/halt.py --reset --config config/paper.yaml`; the 6 open 6/8 positions (BOS/AUS/MIN) still settle.
+
+**Overnight→noon coverage sweep** (`scripts/topk_overnight_2026.py` → `data/topk_overnight_2026.csv`):
+top-1/2/3 market-rank coverage (truth = `settlement_value`, rank = last-trade `yes_price`; the
+`scripts/modal_rank_multicity` conventions) for all 20 cities on 2026 events, **hourly 10 PM prev night →
+12 PM noon local**. Coverage rises **monotonically**; pooled (N flat ~2787 — 2026 overnight markets are
+already liquid) **top-1/2/3 = 47/75/89% at 10 PM → 58/86/96% at noon**. Desert cities (PHX/LV/HOU/MIA)
+saturate overnight (95–98% top-3, barely improve); coastal/microclimate lag (SF tops out 44/77/90%).
+Coverage-only (no cost term) — high late ≠ tradeable edge (price has risen to match; net-EDGE knee is
+~2 PM per `data/anchor_grid.txt`).
+
+**Balance note:** the LIVE account's $23.56 (adoption) → $17.82 drop is the operator's **manual trading**,
+not the bot (LIVE Book: 0 fills, $0 realized, $0 fees, not halted).
+
+---
+
 ## 2. Sizing & risk pipeline
 
 ```
@@ -442,6 +489,8 @@ Expected: 22 fires, +$308 PnL, 20/2 W/L. Positions land in `data/prod_backtest_p
 - `scripts/backtest_strategy.py --model-dir <dir> --anchor-hour-local <H>` — backtest any model dir at any anchor hour; OOF-only mode if the dir lacks deployable artifacts
 - `scripts/chicago_oos_netfee.py [SERIES]` — net-of-**REAL-ceil-fee** OOS replay of the production config on the Chicago (or any) tape, both fills (proxy/realistic) + binomial-vs-breakeven (§1.7)
 - `scripts/forward_edge_tracker.py [--mode --series --since --benchmark]` — accumulate post-go-live REALIZED fires from `live_log.parquet`, settled vs the backfill truth, into a running edge vs the §1.7 +4.6¢ benchmark (the `FWD-TRACK` rollup; blocked on the stale local pull)
+- `scripts/diagnose_paper.py` — why the paper Book is down/halted: joins `data/paper/positions.json` to the `data/backfill` settlement tape, classifies each city-day wing cover/miss, decomposes EV, and reconstructs the 50% drawdown-halt latch point (§1.8)
+- `scripts/topk_overnight_2026.py [SERIES…]` — overnight→noon (10 PM prev night → 12 PM, hourly, local) top-1/2/3 market-rank coverage sweep, all 20 cities, 2026 events → `data/topk_overnight_2026.csv` (reuses `scripts/modal_rank_multicity` conventions; §1.8)
 
 ---
 
@@ -469,7 +518,7 @@ Expected: 22 fires, +$308 PnL, 20/2 W/L. Positions land in `data/prod_backtest_p
 | P2 | **Liquidity verification** | **Volume half ✅ ample (2026-06-02)** — trade-tape check (`scripts/liquidity_check.py` on `kalshi_history.parquet`, 446K prints / 67 events): in the 0–60 min post-anchor window, mid-priced buckets carry a **median ~1,507 contracts/leg** (min ≥4) vs the wing's ~2/leg need — 100% of legs clear it, and the whole leg order is smaller than one median trade print (5 contracts). Fill-by-volume is a non-issue at $2.50; the 1–2 PM window holds ~6.5% of daily volume. **Price/depth half still open (needs ladders, not trades):** ~19% of days (13/67) had no mid-bucket trade *printed* in the exact window (trade-absence ≠ quote-absence — the bot is a taker hitting a resting ask), and the **`mid+1¢` fill PRICE is unvalidated** since the trade tape has no resting bid/ask. Re-run a depth-based check once `scripts/orderbook_logger.py` has ~2 weeks of near-anchor depth ladders (`DEPLOY`). **Update 2026-06-05:** maker-fill feasibility now tested on the deep tape via `taker_side` (`scripts/maker_fill_harness.py`, §1.6) — posting at the bid fills but is adversely selected, so the limit-at-ask **taker** path stays; the forward depth ladders (logger now on all 20) refine the fill-PRICE once ~weeks deep. |
 | EDGE | **Multi-city edge map (deep history)** | ✅ 2026-06-05 — `/historical/*` backfill (3.4 yr × 20 cities, `scripts/backfill_historical.py`) + per-city OOS synthesis (`scripts/per_city_synthesis.py`): **only Chicago durable**; others collapse OOS or decayed as the market matured. §1.6. |
 | FEE-OOS | **Net-of-ceil-fee OOS replay (does the edge survive the REAL fee?)** | ✅ 2026-06-08 — `scripts/chicago_oos_netfee.py` replays the EXACT production config on the 3.4-yr Chicago tape with the real `ceil()` fee in $: edge **survives** (realistic OOS +5.0→**+4.6¢**, ~8% drag) but is **NOT statistically confirmed** (binomial p=0.11; bootstrap P(≤0)≈0.05; selection [Chicago=max of 20] + regime [OOS=recent dense-liquidity only; through-cycle ~+2.5¢]). Fire rate **~164/yr** (the §0 "24" is a single-season count). Audited SOUND-w/-caveats. §1.7 / **L17**. |
-| FWD-TRACK | **Forward-edge rollup (accumulate post-go-live fires vs the +4.6¢ benchmark)** | ✅ WIRED + LIVE 2026-06-08. **Tracker:** `scripts/forward_edge_tracker.py` reads the resident bot's per-mode `data/<mode>/live_log.parquet` (default `paper`; real fills/fees), settles each fire vs the backfill `settlement_value` (via `load_city`, no new auth), and reports running edge + N + WR + binomial-vs-breakeven + z-test vs §1.7's +4.6¢ + ~fires-to-significance, with a `positions.json` Book cross-check. **State sync:** `scripts/pull-state.ps1` + `scripts/merge_state.py` pull both `data/{paper,live}/` state — `live_log.parquet` **rotated→moved** off the droplet (atomic `mv`→shard→pull→byte-verify→remote-delete; bot recreates it; merged into the canonical local log, dedup), `positions.json` **copied** (the live Book is LEFT on the droplet). Scheduled task **`PullBotState`** registered (daily 08:10 CT; `-StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries`; stable WindowsApps `pwsh` alias — bare `pwsh.exe` 0x80070002-fails under Task Scheduler; LastTaskResult 0). First pull landed **paper 394 rows, live 36 rows, anchors Jun 2–7**. A tracker bug — reading the 20-city paper log **without filtering by series**, so other cities' legs matched against Chicago's winner (bogus 0% coverage) — was caught + fixed (series ticker-prefix filter) once the June backfill enabled scoring. **Real state: Chicago has fired 0 times forward** — paper is `no_target` 6/6 days and live is 0 fills; the −$4.99 paper realized P&L is the **other 19 cities**, not Chicago. **Why 0 (diagnosed, not a bug):** every day the top-2 adjacent buckets price to **sum ~0.97–1.03** — an efficiently-priced two-bucket coin-flip — so the wing is negative-EV (`ev_margin<0`) and correctly skipped (`sum_asks<0.90`). Loosening the gate wouldn't help (they clear even the 0.92 EV bound). The wing only fires on a *confident-modal + cheap-adjacent* day (sum<0.90); early-June Chicago has been split-regime, so the forward-significance clock ticks slowly/irregularly (mechanism behind §1.7's low recent fire rate). Recent Chicago backfill was extended to **2026-06-06** (run read-only on the droplet, pulled local) so truth is ready the moment Chicago fires. Net: forward Chicago sample is still **N=0** — the system is wired and correct, but there is nothing to score yet. §1.7. |
+| FWD-TRACK | **Forward-edge rollup (accumulate post-go-live fires vs the +4.6¢ benchmark)** | ✅ WIRED + LIVE 2026-06-08. **Tracker:** `scripts/forward_edge_tracker.py` reads the resident bot's per-mode `data/<mode>/live_log.parquet` (default `paper`; real fills/fees), settles each fire vs the backfill `settlement_value` (via `load_city`, no new auth), and reports running edge + N + WR + binomial-vs-breakeven + z-test vs §1.7's +4.6¢ + ~fires-to-significance, with a `positions.json` Book cross-check. **State sync:** `scripts/pull-state.ps1` + `scripts/merge_state.py` pull both `data/{paper,live}/` state — `live_log.parquet` **rotated→moved** off the droplet (atomic `mv`→shard→pull→byte-verify→remote-delete; bot recreates it; merged into the canonical local log, dedup), `positions.json` **copied** (the live Book is LEFT on the droplet). Scheduled task **`PullBotState`** registered (daily 08:10 CT; `-StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries`; stable WindowsApps `pwsh` alias — bare `pwsh.exe` 0x80070002-fails under Task Scheduler; LastTaskResult 0). First pull landed **paper 394 rows, live 36 rows, anchors Jun 2–7**. A tracker bug — reading the 20-city paper log **without filtering by series**, so other cities' legs matched against Chicago's winner (bogus 0% coverage) — was caught + fixed (series ticker-prefix filter) once the June backfill enabled scoring. **Real state: Chicago has fired 0 times forward** — paper is `no_target` 6/6 days and live is 0 fills; the −$4.99 paper realized P&L is the **other 19 cities**, not Chicago. **Why 0 (diagnosed, not a bug):** every day the top-2 adjacent buckets price to **sum ~0.97–1.03** — an efficiently-priced two-bucket coin-flip — so the wing is negative-EV (`ev_margin<0`) and correctly skipped (`sum_asks<0.90`). Loosening the gate wouldn't help (they clear even the 0.92 EV bound). The wing only fires on a *confident-modal + cheap-adjacent* day (sum<0.90); early-June Chicago has been split-regime, so the forward-significance clock ticks slowly/irregularly (mechanism behind §1.7's low recent fire rate). Recent Chicago backfill was extended to **2026-06-06** (run read-only on the droplet, pulled local) so truth is ready the moment Chicago fires. Net: forward Chicago sample is still **N=0** — the system is wired and correct, but there is nothing to score yet. §1.7. **Update 2026-06-09:** local paper state now synced (resolves the stale-pull blocker); paper realized −$4.99→**−$9.42** and the bot **latched its 50% account halt** — diagnosed structural-negative off-Chicago (`scripts/diagnose_paper.py`): 8 cover/5 miss, EV −$0.72/cohort, `drop_lower_ask` dropped the winner 4/5 misses; Chicago forward sample still **N=0**. §1.8. |
 | DATA-LOC | **Local data relocated out of the repo + droplet kept lean (2026-06-08)** | ✅ Raw market data → `..\data\weather\orderbook` (`OB_LOCAL_DIR`); **truth tape** → `..\data\weather\backfill` (moved out; repo `data/backfill` is now a **directory junction** → `load_city` unchanged); **bot logs stay in the repo** (`data/{paper,live}`). New automation **`RefreshTruthTape`** (daily; `scripts/refresh-truth-tape.ps1` → droplet `backfill_cities` → move-pull → delete). All three pulls (`PullOrderbookZips` / `PullBotState` / `RefreshTruthTape`) follow **zip → move → delete** (verify local, then delete the droplet copy) so the droplet holds only the live Book + the in-progress day's raw. §9.1, `deploy/README.md`. |
 | PROBE2 | **strat_prod_2 model-free probe (branch-local)** | ✅ 2026-06-08 ([`tasks/strat_prod_2_probe.md`](tasks/strat_prod_2_probe.md)). MM spread-capture + running-max ratchet extended to **N=6 — both confirmed dead** (added IEM-ASOS obs fallback + UTC→local-day fix in `ratchet_probe.py`). Model-free idea batches #1 (calibration, day-of-week, interior/tail) + #2 (cross-city synchrony, long-confirm) — **5/5 dead**; market efficient on these axes (re-validates #2). Recommendation: pause model-free probing; the binding work is confirming the wing forward (**FWD-TRACK**). Branch `strat_prod_2`, kept local. |
 | MAKER | **Maker-execution feasibility (the spread lever)** | ✅ TESTED + CLOSED 2026-06-05 — `scripts/maker_fill_harness.py` on the deep tape (`taker_side`): posting at the bid fills (38–89%) but is **adversely selected** (winning legs fill less than losing in 14/20; Chicago maker strictly worse than taker). Doesn't open the 19 or fatten Chicago. Forward depth ladders (logger, all 20) will refine. §1.6 / **L15**. |

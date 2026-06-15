@@ -478,8 +478,35 @@ each entry = `stake_fraction/cap` = **16.67%** slot; P&L at the achievable fill,
   on thin nights and favors east-tz cities (they fire first) — the honest cost of no look-ahead vs the
   §6f backtest's cross-city top-3.
 
+## 6j. Band-width decision — keep [0.93,0.95], reject [0.90,0.95] (2026-06-15)
+
+Tested whether the entry gate is too narrow (`scripts/band_sweep.py`, both markets, 2026 per-city-anchor
+data, fee-aware, the deployed top-3 / 50%-split / compound rule). **70% of favorites are already ≥0.95**
+(excluded as fully-priced), so widening to [0.90,0.95] only ADDS the marginal [0.90,0.93) sub-band.
+
+| market | band | entries | hit | PnL | maxDD | $/day |
+|---|---|--:|--:|--:|--:|--:|
+| HIGH | [0.93,0.95] | 250 | 98.4% | +$2,394 | −24% | +19.5 |
+| HIGH | [0.90,0.95] | 346 | 97.4% | +$2,337 | −50% | +16.2 |
+| LOW | [0.93,0.95] | 111 | 99.1% | +$738 | −15% | +13.2 |
+| LOW | [0.90,0.95] | 138 | 97.8% | +$483 | −51% | +3.9 |
+
+Marginal [0.90,0.93): HIGH n=168, hit 94.6% @ price 0.911; LOW n=49, hit 89.8% @ 0.911.
+
+**Decision: KEEP [0.93,0.95].** Adversarially verified (stats-ml-logic-reviewer + an independent recompute
+— all numbers reproduced exactly). Widening is rejected because: (1) the HIGH marginal "+EV" is **not
+robust** — per-entry CIs overstate significance (entries cluster by day); day-clustered **z_DAY≈0.83
+(p≈0.20)** with a win-rate lower bound below break-even, before the ask haircut (which hits these thin
+sub-0.93 favorites hardest). (2) LOW [0.90,0.93) is **−EV** (wins less than its price). (3) The widened-band
+PnL is **counterfactual** — the −50%/−51% max-DD comes from single nights where 50% rides one thin
+0.90-favorite; those days latch the account drawdown halt (which the sim doesn't model), freezing trading,
+and the narrow band excludes exactly those nights. The band is the risk-adjusted sweet spot, not too narrow.
+The higher-leverage fix is **sizing** (cap per-leg exposure / deploy the full 50% only when ≥2 cities
+qualify), not the gate. See `tasks/lessons.md` L22.
+
 ## 7. Reproduce
 ```
+python scripts/band_sweep.py                                  # §6j band [0.93,0.95] vs [0.90,0.95]
 python scripts/exec_model_backtest.py --rebuild               # §6h per-anchor (A) vs single-UTC (B)
 python scripts/backfill_lowtemp.py --days 400                 # one-time low-temp pull (keyless)
 python scripts/late_night_coverage.py --kind high             # high, full 3.4 yr

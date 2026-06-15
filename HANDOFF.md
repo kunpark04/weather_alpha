@@ -17,6 +17,17 @@ the orderbook zips — see §7 `DEPLOY`.
 
 ## 0. Current state at a glance
 
+> ### LIVE FORWARD-TEST — directional pivot (2026-06-15) ⟵ current
+> The `market_wing` LIVE + PAPER bots are **RETIRED** (live placed 0 trades, $17.82 intact; paper
+> −$10.89 / halted — §1.8). The forward-test is now the **directional confidence algo** (buy the
+> high-confidence favorite per city at its local anchor): a **Rust LIVE engine**
+> ([`rust/`](rust/README.md), Option-A per-anchor, real-order-capable, **ships unarmed**) + a **Python
+> per-anchor PAPER shadow** (`scripts/directional_paper.py`; 11 `weather-alpha-paper-cap@*` timers
+> fetch the LIVE book at each tz's 17:00/22:00). Entry gate = favorite mid ∈ **[0.93,0.95]** (tested
+> widening → rejected; trips the drawdown halt for ~no extra return). Details: **§1.9** + the full
+> record [`tasks/late_night_directional_probe_2026-06-15.md`](tasks/late_night_directional_probe_2026-06-15.md).
+> The `market_wing` material below is retained as the prior production state.
+
 > ### PRODUCTION STRATEGY (paper) — pivoted 2026-05-29
 > **`market_wing` + `drop_lower_ask`, flat-$ sizing — MODEL-FREE.** Anchors on the
 > market modal (the v3 model is *not* used — see §1.5), keeps the higher-ask adjacent,
@@ -336,6 +347,27 @@ Coverage-only (no cost term) — high late ≠ tradeable edge (price has risen t
 not the bot (LIVE Book: 0 fills, $0 realized, $0 fees, not halted).
 
 ---
+
+### 1.9 Directional pivot — Rust LIVE engine + per-anchor PAPER shadow + band decision (2026-06-15)
+
+Retired the `market_wing` bots (§1.8) and stood up the **directional confidence algo** as the forward-test.
+Executable rule (both implementations): buy the favorite when its mid ∈ [0.93,0.95]; daily cap 3
+entries/market/event-date, first-come as anchors fire east→west (no cross-city look-ahead); 16.67% slot;
+P&L at the achievable fill, fee-aware.
+
+- **LIVE = Rust** ([`rust/`](rust/README.md)): modular workspace (`wa-fees/book/algo/kalshi/schedule/state/
+  exec/engine`), 31 parity tests, RSA-PSS auth + rustls, per-city local-anchor scheduler. Real-order-capable
+  but **ships built + UNARMED** (`deploy/wa-engine.service`; build via `deploy/build-engine.{sh,ps1}` in WSL).
+- **PAPER = Python** (`scripts/directional_paper.py`, rebuilt): fetches the **LIVE** Kalshi book at each
+  city's local anchor (not the logged tape), same rule. 11 `weather-alpha-paper-cap@*` `--user` timers
+  (high 17:00 / low 22:00 in ET/CT/MT/PT/AZ + a daily settle); `scripts/paper_peek.sh` for nightly checks;
+  local pull at 11:00 ET (after the 14:00-UTC settle).
+- **Band decision:** tested widening [0.93,0.95] → [0.90,0.95] (`scripts/band_sweep.py`, both markets, 2026
+  anchor data, fee-aware; adversarially verified). **KEEP [0.93,0.95].** The marginal [0.90,0.93) sub-band
+  is −EV on low (89.8% @ price 0.911) and not day-clustered-significant on high (z_DAY≈0.83); the wider
+  band roughly doubles/triples max-DD to −50%/−51% (trips the account halt) for ~no extra return (high) or
+  half the return (low). The real risk lever is **sizing** (50% on one undiversified leg on single-favorite
+  nights), not the gate. Probe doc §6h–§6j; `tasks/lessons.md` L22.
 
 ## 2. Sizing & risk pipeline
 

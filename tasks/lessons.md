@@ -5,6 +5,32 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L22 — To widen an entry gate, prove the MARGINAL entries are day-clustered-significant +EV AND model the risk-halt; per-entry CIs + halt-free backtests both flatter a riskier variant
+
+**Context.** Asked whether the directional bot's favorite-mid gate `[0.93,0.95]` was too narrow vs
+`[0.90,0.95]`, I first read the marginal `[0.90,0.93)` sub-band as "+EV" on HIGH (per-entry Wilson
+[90.1%,97.2%]). An adversarial stats review corrected two things: (1) the entries **cluster by day**
+(168 entries ≈ 104 days), so the per-entry CI overstates significance — **day-clustered** it's z≈0.83
+(p≈0.20) with a win-rate lower bound *below* break-even, i.e. not a real edge; (2) the capped backtest
+**didn't model the deployed account drawdown halt**, so the widened band's "+PnL" was counterfactual —
+its −50% max-DD comes from single nights where 50% rides one thin 0.90-favorite, which would latch the
+halt and freeze trading.
+
+**Rule.** Before widening/loosening any selection gate to "get more trades": (a) isolate the **marginal
+slice** the change adds (not the whole band) and test its net-of-fee EV with **day-clustered**
+significance (group by day, not per-entry — clustered observations inflate per-entry CIs), requiring the
+win-rate lower bound to clear break-even+fee *before* the ask haircut; (b) re-run the full strategy **with
+the production risk-halt modeled** — a halt-free sim overstates a higher-variance variant because it
+"keeps trading" through a drawdown the live bot would freeze on; (c) coverage ≠ edge [[L13]] and re-apply
+OOS [[L12]]. More entries at a price the market already set is volume, not alpha — often the real lever is
+sizing/diversification, not the gate.
+
+**Why it matters.** Widening a gate feels free ("more trades, same logic") but quietly adds zero-/negative-
+EV volume and pushes drawdown into the halt — the worst case is a backtest showing "+PnL" for a variant
+that would actually halt-and-freeze live. The narrow gate that "trades less" was the risk-adjusted optimum.
+
+---
+
 ## L21 — Never call a dir "empty"/redundant from a partial filter; enumerate ALL of it before a destructive op
 
 **Context.** Verifying the relocated droplet's local pull dirs, I counted only `*.zip` in

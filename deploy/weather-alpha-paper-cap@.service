@@ -1,0 +1,13 @@
+[Unit]
+# Templated directional PAPER bot (Option-A, live per-anchor). One instance per (tz, market) +
+# a "settle" instance, activated by the matching weather-alpha-paper-cap@<instance>.timer.
+Description=Weather-Alpha directional PAPER (%i) — live per-anchor capture/settle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/weather-alpha
+ExecStart=%h/weather-alpha/scripts/paper_capture.sh %i
+# read-only RW key is fine here (settlement is keyless; capture is keyless) — no order placement.
+Nice=5

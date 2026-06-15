@@ -1,0 +1,22 @@
+[Unit]
+# Weather-Alpha LIVE engine (Rust, Option-A per-anchor true-live-replication).
+# Ships DISABLED + in --paper (safe). To ARM real orders: edit ExecStart --paper -> --live, ensure
+# the RW key env file exists, then `systemctl --user enable --now wa-engine`. The Python paper bot
+# (weather-alpha-paper-cap@*) is the paper shadow and is independent of this unit.
+Description=Weather-Alpha LIVE engine (Rust, Option-A)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/weather-alpha
+ExecStart=%h/weather-alpha/bin/wa-engine --config %h/weather-alpha/rust/wa.toml --paper
+# RW key (read-only is enough for paper; needed for --live order placement). Optional (the leading
+# '-' means "don't fail if absent") so paper/dry-run runs without it.
+EnvironmentFile=-%h/weather-alpha/secrets/kalshi-rw.env
+Restart=on-failure
+RestartSec=30
+Nice=5
+
+[Install]
+WantedBy=default.target

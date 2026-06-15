@@ -1,5 +1,7 @@
-# systemd --user variant of the orderbook logger: logs bid/ask + depth ladders for ALL 20 daily-high
-# series. Authenticated READ-ONLY via EnvironmentFile (the RW key, GET-only -> higher rate-limit tier;
+# systemd --user variant of the orderbook logger: logs bid/ask + depth ladders for ALL 20 daily-HIGH
+# series + 19 daily-LOW series (KXLOWT*; added 2026-06-15 to forward-test the directional algo against
+# live low-temp asks). 39 series @ 60s = ~234 markets/cycle in ~13s on the authed tier (tested clean).
+# Authenticated READ-ONLY via EnvironmentFile (the RW key, GET-only -> higher rate-limit tier;
 # '-' = falls back to keyless if absent). Installed by deploy/setup-local.sh (rewrites %h/weather-alpha
 # to your clone path). Manual install: cp to ~/.config/systemd/user/ only if your clone is at ~/weather-alpha.
 [Unit]
@@ -9,7 +11,7 @@ Description=Kalshi daily-high orderbook logger (weather-alpha, --user)
 Type=simple
 WorkingDirectory=%h/weather-alpha
 EnvironmentFile=-%h/weather-alpha/secrets/kalshi-rw.env
-ExecStart=%h/weather-alpha/.venv/bin/python %h/weather-alpha/scripts/orderbook_logger.py --interval 60 --out %h/weather-alpha/data/orderbook --series KXHIGHCHI,KXHIGHTHOU,KXHIGHNY,KXHIGHMIA,KXHIGHAUS,KXHIGHDEN,KXHIGHPHIL,KXHIGHLAX,KXHIGHTLV,KXHIGHTNOLA,KXHIGHTSEA,KXHIGHTSFO,KXHIGHTDC,KXHIGHTATL,KXHIGHTMIN,KXHIGHTPHX,KXHIGHTBOS,KXHIGHTDAL,KXHIGHTOKC,KXHIGHTSATX
+ExecStart=%h/weather-alpha/.venv/bin/python %h/weather-alpha/scripts/orderbook_logger.py --interval 60 --out %h/weather-alpha/data/orderbook --series KXHIGHCHI,KXHIGHTHOU,KXHIGHNY,KXHIGHMIA,KXHIGHAUS,KXHIGHDEN,KXHIGHPHIL,KXHIGHLAX,KXHIGHTLV,KXHIGHTNOLA,KXHIGHTSEA,KXHIGHTSFO,KXHIGHTDC,KXHIGHTATL,KXHIGHTMIN,KXHIGHTPHX,KXHIGHTBOS,KXHIGHTDAL,KXHIGHTOKC,KXHIGHTSATX,KXLOWTCHI,KXLOWTMIA,KXLOWTAUS,KXLOWTDEN,KXLOWTPHIL,KXLOWTLAX,KXLOWTLV,KXLOWTNOLA,KXLOWTSEA,KXLOWTSFO,KXLOWTDC,KXLOWTATL,KXLOWTMIN,KXLOWTPHX,KXLOWTBOS,KXLOWTDAL,KXLOWTOKC,KXLOWTSATX,KXLOWTHOU
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

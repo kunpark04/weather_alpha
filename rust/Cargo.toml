@@ -1,0 +1,58 @@
+# Weather-Alpha LIVE engine — Rust workspace (Option-A directional strategy).
+#
+# Functional decomposition (one concern per crate, no monolith):
+#   wa-fees     pure Kalshi fee model
+#   wa-book     orderbook types, favorite/band, depth-feasibility ladder walk  (pure)
+#   wa-algo     executable per-city Option-A decision rule                     (pure)
+#   wa-schedule per-city local-anchor scheduler (chrono-tz, heap next-anchor)
+#   wa-state    Book persistence (bankroll / HWM / halts / daily counter)
+#   wa-kalshi   REST client (RSA-PSS auth, markets/orderbook/portfolio/orders)
+#   wa-exec     paper/live execution routing + risk caps + kill switch
+#   wa-engine   the resident daemon binary that wires it together
+#
+# Pure crates carry unit tests asserting parity with the Python reference
+# (weather_alpha/fees.py, scripts/directional_paper.py). Members are added as
+# crates land so `cargo build` works at every step.
+[workspace]
+resolver = "2"
+members = [
+    "crates/wa-fees",
+    "crates/wa-book",
+    "crates/wa-algo",
+    "crates/wa-kalshi",
+    "crates/wa-schedule",
+    "crates/wa-state",
+    "crates/wa-exec",
+    "crates/wa-engine",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+chrono-tz = "0.10"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
+# reqwest: blocking client (no async runtime needed for a once-per-anchor flow) + rustls (pure-Rust
+# TLS, so the musl static link has no OpenSSL C dependency).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+# Optimize the release binary that ships to the droplet: thin LTO + one codegen unit + stripped.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

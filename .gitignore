@@ -55,6 +55,12 @@ data/backfill/
 data/analysis/
 data/*.txt
 data/noaa_actuals/
+# directional paper-test logs pulled from the droplet (runtime data)
+data/directional_paper/
+# Rust engine state/log (runtime)
+data/wa_engine/
+# stray local temp artifacts
+_tmp_*
 
 # Subagent coordination artifacts (transient)
 tasks/_agent_bus/

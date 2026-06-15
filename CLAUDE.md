@@ -23,7 +23,22 @@ unexercised until it fires at the next 1 PM CT anchor. **Live since 2026-06-02:*
 (`systemd --user`), with a daily local pull of the orderbook zips; the LIVE bot is armed and
 adopted the real $23.56 balance. **As of 2026-06-05** the PAPER bot shadows **all 20 cities** and
 the logger logs **all 20 series** (both authenticate the RW key *read-only*; paper still places no
-real orders). A deep-history study (`/historical/*`, 3.4 yr × 20 cities) found **only Chicago has a
+real orders). **As of 2026-06-15 the `market_wing` LIVE + PAPER bots are RETIRED**
+(`systemctl --user disable --now`): the live bot ever placed **0 trades** (every Chicago day
+wing-skipped on `sum_asks ≥ 0.9`; real balance $17.82, untouched), the paper bot ended −$10.89 /
+account-halted. In their place, a **forward paper-test of the directional confidence algo** (probe
+doc §6f): the orderbook logger now logs **39 series (20 high `KXHIGH*` + 19 low `KXLOWT*`)**, and the
+Python paper bot (`scripts/directional_paper.py`) was **rebuilt (2026-06-15) to follow live trading
+behavior** — **11 `systemd --user` timers `weather-alpha-paper-cap@*`** fire it **per (timezone,
+market) at each city's local anchor** (high 17:00 / low 22:00; ET/CT/MT/PT/AZ) where it fetches the
+**LIVE** Kalshi book *at that moment* (not the logged tape), buys the high-confidence favorite under
+the **executable rule** (favorite mid ∈ [0.93,0.95]; daily cap 3 entries/market/event-date,
+first-come as anchors fire east→west, **no cross-city look-ahead**; 16.67% slot), records order-book
+**depth-feasibility**, and settles via Kalshi (a daily settle timer). The old batch timers
+`directional-paper-{high,low}` are retired. The **LIVE engine is a separate Rust daemon**
+([`rust/`](rust/README.md), Option-A per-anchor, real-order-capable) that mirrors the same executable
+rule and **ships built but unarmed**. The orderbook logger remains the only always-on writer.
+A deep-history study (`/historical/*`, 3.4 yr × 20 cities) found **only Chicago has a
 durable edge** and **maker execution doesn't help** (adverse selection). See
 [`HANDOFF.md`](HANDOFF.md) §1.5, §1.6, §7 (`DEPLOY`/`L2`).
 
@@ -241,16 +256,18 @@ Every md file that governs how this project is worked on:
 | [`README.md`](README.md) | Project entry point — current state, folder overview, quick start |
 | [`HANDOFF.md`](HANDOFF.md) | Durable hand-off — full result tables, sizing pipeline, open items, reproducible commands |
 | [`README_PROD.md`](README_PROD.md) | Production engine (`weather_alpha/`) architecture, paper-mode setup, going-live checklist |
+| [`rust/README.md`](rust/README.md) | **Rust LIVE engine** for the Option-A directional strategy — modular crate workspace, per-anchor true-live-replication, build/deploy/arm. Paper shadow stays Python (`scripts/directional_paper.py`) |
 | [`Language and Architecture Choices for a Production-Grade Kalshi Trading Bot in the Terminal.md`](Language%20and%20Architecture%20Choices%20for%20a%20Production-Grade%20Kalshi%20Trading%20Bot%20in%20the%20Terminal.md) | Research doc — Python/C++/Rust/Go trade-offs, TUI framework choices, Kalshi SDK landscape |
 | `notebooks/model_v3.ipynb` | Production model notebook — features, CV, calibration, §10.3 Kalshi-resolution diagnostic |
 | `notebooks/model_v4.ipynb` | Parallel R&D variant — midnight anchor (NOT production) |
 | `notebooks/live_predict.ipynb` | Live prediction pipeline (loads v3 artifacts) |
 | `config/weather_alpha.yaml` | Default strategy/risk config (single-market); multi-market lives in `config/{live,paper}.yaml`, per-tz one-shots in `config/{chicago_live,houston_paper}.yaml` |
-| [`deploy/README.md`](deploy/README.md) | Always-on deployment guide — orderbook-logger + the two bot shapes (Option A per-city timers / Option B resident multi-market), operator tools (`scripts/kill.py`, `scripts/halt.py` — both need `--config`) |
+| [`deploy/README.md`](deploy/README.md) | Always-on deployment guide — orderbook-logger + the market_wing bot shapes (Option A/B), the **directional per-anchor PAPER timers** (`weather-alpha-paper-cap@*`, §"Directional paper"), the **Rust LIVE engine** build/arm, operator tools (`scripts/kill.py`, `scripts/halt.py` — both need `--config`) |
 | [`tasks/multimarket_refactor_plan.md`](tasks/multimarket_refactor_plan.md) | Multi-market refactor design + locked decisions (markets list, shared Book, per-tz scheduler, drawdown halts) |
 | [`tasks/engine_code_review_2026-06-01.md`](tasks/engine_code_review_2026-06-01.md) | Adversarial engine review (2 CRITICAL · 7 WARN · 8 INFO + follow-up) with a Resolution section — all fixed; TUI read-only conversion deferred |
 | [`tasks/lessons.md`](tasks/lessons.md) | Self-improvement log — recurring-mistake patterns + prevention rules |
 | [`tasks/strat_prod_2_probe.md`](tasks/strat_prod_2_probe.md) | `strat_prod_2` model-free probe log — MM/ratchet (N=6) + idea batches #1/#2, all dead; repoint record |
+| [`tasks/late_night_directional_probe_2026-06-15.md`](tasks/late_night_directional_probe_2026-06-15.md) | Late-night top-1/top-2 coverage probe (high + low temp, 8PM–midnight) — premise true, trade dead: high fully priced (ask 1.00), low = real min-forming uncertainty; no executable edge |
 | [`tasks/todo.md`](tasks/todo.md) | Go-live ship checklist (the $25 Kalshi account) |
 | [`tasks/review_engine_logic.md`](tasks/review_engine_logic.md), [`tasks/review_backtest_stats.md`](tasks/review_backtest_stats.md) | Pre-live adversarial reviews — LIVE trading-path logic + backtest stats/methodology |
 | [`tasks/engine_review_2026-06-02.md`](tasks/engine_review_2026-06-02.md), [`tasks/engine_hardening_review_2026-06-03.md`](tasks/engine_hardening_review_2026-06-03.md) | Engine correctness + hardening audits (2026-06-02 / 06-03) |

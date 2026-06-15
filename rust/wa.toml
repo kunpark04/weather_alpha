@@ -1,0 +1,141 @@
+# Weather-Alpha LIVE engine config (Option-A directional strategy).
+# Paths are relative to the process working directory (systemd sets it to ~/weather-alpha).
+# `mode` here is the resident default; CLI --paper/--live/--dry-run overrides it.
+
+bankroll_init        = 250.0      # per-market starting bankroll (high and low are independent)
+mode                 = "paper"
+state_path           = "data/wa_engine/state.json"
+log_path             = "data/wa_engine/log.jsonl"
+kill_switch_path     = "data/wa_engine/KILL_SWITCH"
+key_id_env           = "KALSHI_KEY_ID"            # only read in --live
+private_key_path_env = "KALSHI_PRIVATE_KEY_PATH"  # only read in --live
+anchor_window_min    = 60         # process an anchor within 60 min; no off-anchor catch-up after
+poll_interval_sec    = 300
+
+[algo]
+band_lo        = 0.93
+band_hi        = 0.95
+daily_cap      = 3      # max entries per market per event-date (the "top-3" cap)
+stake_fraction = 0.50   # total fraction of bankroll across the day's cap slots
+cap_price      = 0.97   # walk the ask ladder only up to this price
+
+# --- cities (series prefixes + IANA tz). NYC has no KXLOWT low series -> series_low = "". ---
+[[cities]]
+name = "NYC"
+series_high = "KXHIGHNY"
+series_low = ""
+tz = "America/New_York"
+
+[[cities]]
+name = "Chicago"
+series_high = "KXHIGHCHI"
+series_low = "KXLOWTCHI"
+tz = "America/Chicago"
+
+[[cities]]
+name = "Miami"
+series_high = "KXHIGHMIA"
+series_low = "KXLOWTMIA"
+tz = "America/New_York"
+
+[[cities]]
+name = "Austin"
+series_high = "KXHIGHAUS"
+series_low = "KXLOWTAUS"
+tz = "America/Chicago"
+
+[[cities]]
+name = "Denver"
+series_high = "KXHIGHDEN"
+series_low = "KXLOWTDEN"
+tz = "America/Denver"
+
+[[cities]]
+name = "Philadelphia"
+series_high = "KXHIGHPHIL"
+series_low = "KXLOWTPHIL"
+tz = "America/New_York"
+
+[[cities]]
+name = "Los Angeles"
+series_high = "KXHIGHLAX"
+series_low = "KXLOWTLAX"
+tz = "America/Los_Angeles"
+
+[[cities]]
+name = "Las Vegas"
+series_high = "KXHIGHTLV"
+series_low = "KXLOWTLV"
+tz = "America/Los_Angeles"
+
+[[cities]]
+name = "New Orleans"
+series_high = "KXHIGHTNOLA"
+series_low = "KXLOWTNOLA"
+tz = "America/Chicago"
+
+[[cities]]
+name = "Seattle"
+series_high = "KXHIGHTSEA"
+series_low = "KXLOWTSEA"
+tz = "America/Los_Angeles"
+
+[[cities]]
+name = "San Francisco"
+series_high = "KXHIGHTSFO"
+series_low = "KXLOWTSFO"
+tz = "America/Los_Angeles"
+
+[[cities]]
+name = "Washington DC"
+series_high = "KXHIGHTDC"
+series_low = "KXLOWTDC"
+tz = "America/New_York"
+
+[[cities]]
+name = "Atlanta"
+series_high = "KXHIGHTATL"
+series_low = "KXLOWTATL"
+tz = "America/New_York"
+
+[[cities]]
+name = "Minneapolis"
+series_high = "KXHIGHTMIN"
+series_low = "KXLOWTMIN"
+tz = "America/Chicago"
+
+[[cities]]
+name = "Phoenix"
+series_high = "KXHIGHTPHX"
+series_low = "KXLOWTPHX"
+tz = "America/Phoenix"
+
+[[cities]]
+name = "Boston"
+series_high = "KXHIGHTBOS"
+series_low = "KXLOWTBOS"
+tz = "America/New_York"
+
+[[cities]]
+name = "Dallas"
+series_high = "KXHIGHTDAL"
+series_low = "KXLOWTDAL"
+tz = "America/Chicago"
+
+[[cities]]
+name = "Oklahoma City"
+series_high = "KXHIGHTOKC"
+series_low = "KXLOWTOKC"
+tz = "America/Chicago"
+
+[[cities]]
+name = "San Antonio"
+series_high = "KXHIGHTSATX"
+series_low = "KXLOWTSATX"
+tz = "America/Chicago"
+
+[[cities]]
+name = "Houston"
+series_high = "KXHIGHTHOU"
+series_low = "KXLOWTHOU"
+tz = "America/Chicago"

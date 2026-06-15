@@ -393,3 +393,47 @@ Installs three `--user` units: `weather-alpha-live` (`config/live.yaml`), `weath
 Stop a service with `systemctl --user disable --now <unit>`; emergency-halt the live bot with
 `python scripts/kill.py --config config/live.yaml`. `setup-local.sh` is idempotent — safe to re-run
 after a `git pull`.
+
+---
+
+# Directional algo — Rust LIVE engine + Python per-anchor PAPER shadow (2026-06-15)
+
+Separate from the retired `market_wing` bots. Forward-tests the directional algo
+(`tasks/late_night_directional_probe_2026-06-15.md` §6f) against **live asks + order-book depth**. Two
+implementations of the **same executable Option-A rule** (favorite mid ∈ 0.93–0.95 → buy; daily cap 3
+entries/market/event-date, first-come as tz anchors fire east→west, **no cross-city look-ahead**;
+16.67% slot; P&L at the achievable fill):
+
+- **LIVE = Rust** ([`rust/`](../rust/README.md), real-order-capable, **ships built but UNARMED**). Build a
+  Linux binary in WSL (`powershell -File deploy/build-engine.ps1` → `rust/dist/wa-engine`), `scp` it to
+  `weather-alpha@HOST:weather-alpha/bin/`, install `deploy/wa-engine.service` (ships `--paper`, disabled).
+  **Arm later:** edit `--paper`→`--live`, ensure `secrets/kalshi-rw.env`, `systemctl --user enable --now wa-engine`.
+- **PAPER = Python** (`scripts/directional_paper.py`, **no orders**) — **rebuilt to follow live behavior**:
+  fires **per (timezone, market) at each city's local anchor** and fetches the **LIVE Kalshi book at that
+  moment** (not the logged tape); logs LIVE `yes_ask` + depth ladder + intended-vs-fillable + VWAP/slippage;
+  settles via Kalshi `settlement_value`. Output: `data/directional_paper/{high,low}_log.parquet` + `paper_state.json`.
+- **Logger** (`orderbook-logger-user`) still logs **39 series** for the backtest tape (independent of the bots).
+
+**Timers** — 11 one-shot `--user` units `weather-alpha-paper-cap@*` (high 17:00 / low 22:00 **local** in
+ET/CT/MT/PT/AZ = 10 capture + 1 daily settle @ 14:00 UTC), generated + enabled by
+`deploy/install-paper-timers.sh`. The OLD batch timers `directional-paper-{high,low}` (00:30/06:00 UTC)
+are **retired**.
+```bash
+scp scripts/directional_paper.py scripts/paper_capture.sh weather-alpha@HOST:weather-alpha/scripts/
+scp deploy/weather-alpha-paper-cap@.service weather-alpha@HOST:.config/systemd/user/
+scp deploy/install-paper-timers.sh weather-alpha@HOST:weather-alpha/deploy/
+ssh weather-alpha@HOST 'chmod +x ~/weather-alpha/scripts/paper_capture.sh \
+   ~/weather-alpha/deploy/install-paper-timers.sh && bash ~/weather-alpha/deploy/install-paper-timers.sh'
+```
+- **Capture is MAX-DATA** ("better safe than sorry"): one row per city SCANNED at the anchor (not just
+  picks), 46 fields — all raw quote fields (bid/ask/sizes, vol, vol_24h, open_interest, liquidity,
+  status), the full `yes_book`/`no_book` ladders + whole-event `distribution` (JSON), runner-up,
+  `sum_yes_ask`, `staleness_sec` (≈0 now — fetched live at the anchor), plus the pick's feasibility.
+  `picked` (first-3 in-band, executable cap — no look-ahead) drives paper P&L; the rest are archival
+  context; settlement records `win` for every row.
+- **Daily local pull** (`scripts/pull-directional-paper.ps1`, Scheduled Task `PullDirectionalPaper`,
+  **11:00 ET** — moved past the 14:00 UTC settle so the pull reflects the prior night's SETTLED P&L):
+  COPIES `{high,low}_log.parquet` + `paper_state.json` down to the repo's `data/directional_paper/`
+  (no rotation/delete — the droplet stays the canonical writer). Runs indefinitely; closed-laptop safe.
+- **Nightly peek (no pull):** `ssh weather-alpha@HOST 'bash weather-alpha/scripts/paper_peek.sh'` —
+  prints today's scanned/entered counts, the entries table (+ win/PnL once settled), and the bankroll.

@@ -1,0 +1,13 @@
+[package]
+name = "wa-exec"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+wa-algo = { path = "../wa-algo" }
+wa-fees = { path = "../wa-fees" }
+wa-kalshi = { path = "../wa-kalshi" }
+wa-state = { path = "../wa-state" }
+anyhow.workspace = true
+tracing.workspace = true

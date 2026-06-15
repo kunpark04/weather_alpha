@@ -1,0 +1,9 @@
+[package]
+name = "wa-schedule"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true

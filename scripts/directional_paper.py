@@ -119,22 +119,37 @@ def fetch_markets(event_ticker: str) -> list[dict]:
 
 
 def fetch_orderbook(ticker: str) -> dict:
+    """Return {'yes': [[price_dollars, size], ...], 'no': [...]} (dollar prices).
+    Kalshi serves the book under 'orderbook_fp' with dollar-denominated
+    'yes_dollars'/'no_dollars' (exactly what orderbook_logger.py reads); the legacy
+    'orderbook' shape was cents. Handle both so the depth ladder always populates."""
     try:
-        return http_json(f"{API}/markets/{ticker}/orderbook").get("orderbook", {}) or {}
+        j = http_json(f"{API}/markets/{ticker}/orderbook")
     except Exception as e:
         print(f"   ! fetch_orderbook {ticker} failed: {e}")
-        return {}
+        return {"yes": [], "no": []}
+    fp = j.get("orderbook_fp")
+    if isinstance(fp, dict):  # current API: already-dollar 'yes_dollars'/'no_dollars'
+        return {"yes": _coerce_levels(fp.get("yes_dollars")), "no": _coerce_levels(fp.get("no_dollars"))}
+    ob = j.get("orderbook", {}) or {}  # legacy cents shape -> scale down
+    return {"yes": _book_dollars(ob.get("yes")), "no": _book_dollars(ob.get("no"))}
 
 
-def _book_dollars(levels) -> list:
-    """Kalshi orderbook levels [[price_cents, size], ...] -> [[price_dollars, size], ...]."""
+def _coerce_levels(levels) -> list:
+    """[[price, size], ...] (str or num) -> [[float_price, float_size], ...], NO scaling
+    (orderbook_fp prices are already dollars)."""
     out = []
     for lvl in (levels or []):
         if isinstance(lvl, (list, tuple)) and len(lvl) >= 2:
-            c, sz = _f(lvl[0]), _f(lvl[1])
-            if c is not None and sz is not None:
-                out.append([round(c / 100.0, 4), sz])
+            p, sz = _f(lvl[0]), _f(lvl[1])
+            if p is not None and sz is not None:
+                out.append([round(p, 4), sz])
     return out
+
+
+def _book_dollars(levels) -> list:
+    """Legacy cents ladder [[price_cents, size], ...] -> [[price_dollars, size], ...]."""
+    return [[round(p / 100.0, 4), sz] for p, sz in _coerce_levels(levels)]
 
 
 def rec_from_market(m: dict) -> dict:
@@ -301,9 +316,9 @@ def capture(market: str, tzname: str, event_date: str, state: dict):
             "win": None, "paper_pnl_usd": None, "settled": False,
         }
         if will_enter:
-            ob = fetch_orderbook(fav)
-            rec["no_book"] = _book_dollars(ob.get("no"))
-            rec["yes_book"] = _book_dollars(ob.get("yes"))
+            ob = fetch_orderbook(fav)  # already dollar-denominated {'yes': [...], 'no': [...]}
+            rec["no_book"] = ob.get("no") or []
+            rec["yes_book"] = ob.get("yes") or []
             ladder = yes_ask_ladder(rec)
             rec["yes_ask_size"] = ladder[0][1] if ladder else None  # size at the best live ask
             stake_each = (STAKE / NCITIES) * bal

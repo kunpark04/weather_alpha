@@ -462,7 +462,7 @@ a paper shadow that share one **executable rule** (no cross-city look-ahead): fa
 each entry = `stake_fraction/cap` = **16.67%** slot; P&L at the achievable fill, net of fee.
 
 - **LIVE = Rust** (`rust/`, see `rust/README.md`): a modular cargo workspace (`wa-fees/book/algo/
-  kalshi/schedule/state/exec/engine`), 32 parity tests vs the Python, clippy-clean, live-smoke-tested
+  kalshi/schedule/state/exec/engine`), 34 parity tests vs the Python, clippy-clean, live-smoke-tested
   (keyless fetch → favorite → band → feasibility → log). Resident daemon wakes at each city's local
   anchor, fetches the live book, decides, and is real-order-capable (RSA-PSS auth, limit-at-ask taker)
   but **ships built + UNARMED** (`deploy/wa-engine.service`, `deploy/build-engine.{sh,ps1}`). Built as
@@ -532,8 +532,84 @@ recording nothing — the exact signal this forward-test exists to collect. Know
 same bug had also reached the Rust LIVE engine** — a follow-up task fixed `rust/crates/wa-kalshi/src/parse.rs`
 (reads `orderbook_fp`/`*_dollars` via a string-or-number coercion, legacy-cents fallback) and rewrote the
 stale fixture; **`cargo test -p wa-kalshi` passes** (parity suite 31→32), the binary was rebuilt, still
-UNARMED. The fix is in the working tree, **uncommitted**. See `tasks/lessons.md` L23, HANDOFF §7 (`RUST-OB`),
+UNARMED. The fix was **committed 2026-06-16** alongside the Fix A/B safety work (§6l). See `tasks/lessons.md` L23, HANDOFF §7 (`RUST-OB`),
 and the memory `kalshi-orderbook-api-shape`.
+
+## 6l. Pre-arming safety & confirmation checklist — Rust LIVE engine (2026-06-16)
+
+The Rust engine (`rust/`) is real-order-capable but **ships UNARMED** (`--paper`, `wa-engine.service`
+disabled). This is the safety/confirmation audit gating the `--paper`→`--live` flip. *(File refs are under
+`rust/crates/*/src/`; short form e.g. `main.rs:194` = `wa-engine/src/main.rs`.)*
+
+> **Headline:** the live order path is **fire-and-forget** — `place_if_live` returns on the order *ack*
+> and the position is booked off the **pre-trade depth walk**, never the actual fill. Several gaps are
+> **regressions** from the retired Python `market_wing` engine, which already built fill-confirmation
+> (HANDOFF §7 `L0` C1), real-balance adopt/resync (`L3` W1/W5), and exchange reconciliation (`RECON`);
+> the Rust rewrite has not ported them. **Do not arm until G1–G4 are done + a canary fill (G11) passes.**
+
+### Present (✅ already implemented)
+| Area | Feature | Where |
+|---|---|---|
+| Arming | Ships `--paper`/disabled; `--live` is a deliberate unit-file edit; `--once`⇒dry-run | `main.rs:44-53` |
+| Pre-trade gate | ≥3 priced buckets · favorite exists · mid ∈ [0.93,0.95] · daily cap 3 | `wa-algo:102-115` |
+| Sizing | Depth-aware: orders `floor(fillable_contracts)` walked only to `cap_price` 0.97 — won't chase up the book | `wa-exec:57`, `wa-book:113` |
+| Halts | Latched account-50% / city-25% drawdown, checked before any work | `main.rs:194-207`, `wa-state:118-137` |
+| Kill switch | File-exists check gates the live POST | `main.rs:241`, `wa-exec:41` |
+| Isolation | Per-city quote/order errors log+return; one city can't crash the loop | `main.rs:209,247` |
+| No catch-up | Stale anchor past the 60-min window is skipped, not fired late | `main.rs:122` |
+| Idempotency | Deterministic `client_order_id = wa-{ticker}-{date}` | `main.rs:246` |
+| State | Atomic temp+rename write; corrupt file ⇒ refuse to start (never zero the bankroll) | `wa-state:163-184` |
+| Dedupe | Processed-anchor set, pruned daily | `wa-state:197` |
+| Settlement | Books only on exactly-one-`yes`; ambiguous/unsettled stays open & retries | `main.rs:301`, parse `settlement_winner` |
+| Retries | Public GET 429/5xx ×6 backoff; signed 5xx ×3 | `wa-kalshi:55,117` |
+| Order validation | side/action whitelist + `count>0` guard | `wa-kalshi:180-185` |
+
+### Gaps (severity-ranked)
+| Sev | # | Gap | Fix |
+|---|---|---|---|
+| ✅ DONE | G1 | **No fill confirmation.** OpenPosition recorded *predicted* `fillable_contracts`/`fill_vwap`; a limit-at-ask that doesn't cross rests/partials was booked as a phantom full fill. | **Fix-B ✓ 2026-06-16** |
+| ✅ DONE | G2 | **Bankroll not synced to the real account** — sized off `cfg.bankroll_init`, balance only *logged*. Lesson #11; regression from `L3`. Wrinkle: `high`+`low` are independent Books but share one real account. | **Fix-A ✓ 2026-06-16** |
+| 🟠 REC | G3 | **Crash between place and save** (`main.rs:119-127`) — real order untracked; orphaned if restart is past the window. coid stops a *double*, not a *lost*, order. | Journal intent before POST |
+| 🟠 REC | G4 | **No reconciliation** — `positions_raw()` exists (`wa-kalshi:166`) but is never called. Regression from `RECON`. | Boot+cycle reconcile vs `/portfolio/*`; halt on divergence (+ booked-vs-balance drift, deferred here from Fix-A) |
+| 🟠 REC | G5 | **No aggregate exposure cap** — only the daily-3 count bounds risk (Python had `total_exposure_max_pct`). | `total_exposure_max_usd` gate |
+| 🟠 REC | G6 | **No per-order sanity bound** — bad `yes_ask` (0 / 1.0) flows into `limit_cents`; no max-count/$. | Assert `yes_ask∈(0,1)`, `limit∈[1,99]`, count/$ ≤ max |
+| 🟠 REC | G7 | **Limit not guaranteed marketable** — limit = ask captured pre-fetch; any uptick ⇒ no cross. | Re-fetch top-of-book pre-POST or +buffer ≤cap |
+| 🟡 NICE | G8 | **POST retries on 5xx/timeout** (`wa-kalshi:146`) — double-fill safety rests entirely on Kalshi honoring coid. | Confirm idempotency contract; reconcile on ambiguous fail |
+| 🟡 NICE | G9 | No liveness heartbeat (dead daemon undetectable between anchors). | Health-file touch + watchdog |
+| 🟡 NICE | G10 | No push alerting (order_error/kill/halt/divergence are log-only). | Wire a notifier |
+| 🟡 NICE | G11 | No first-trade canary. | Cap first K live entries to 1 contract (or manual confirm) |
+| 🟡 NICE | G12 | No absolute daily-loss stop (only drawdown-from-peak). | Optional `daily_max_loss_usd` |
+
+### Fix-A — real-balance sync (G2) ✅ Implemented 2026-06-16
+Single shared `EngineState.live_bankroll` (one real Kalshi account) = balance × new config knob
+`live_alloc_frac` (default 1.0; **set the % at deploy**). Adopted at activation from
+`client.balance_cents()` — **FATAL if the balance can't be read** (never arm blind on a config number);
+both markets size off it in live (`process_anchor`), while the per-market Book bankrolls keep rolling for
+the orthogonal drawdown halts. Re-synced to the real balance after every `settle_open` pass
+(`sync_live_bankroll`; on a read failure the prior value is kept, never zeroed). Paper/dry-run unchanged
+(per-market `bankroll_init`). **Deferred to G4:** the booked-vs-realized *drift detector* — a correct one
+must net out entry costs (placing an order also moves the balance), so it belongs with the reconciliation
+work, not a naive |booked−Δbalance| check. **Touched:** `config.rs` (+`live_alloc_frac`), `wa-state`
+(+`live_bankroll`), `main.rs` (adopt/resync/sizing), `wa.toml`.
+
+### Fix-B — fill confirmation (G1) ✅ Implemented 2026-06-16
+`wa-exec::execute()` replaces `place_if_live` and returns `Execution::{Filled{order_id,contracts,
+fill_vwap}|NoFill}`. Paper/dry-run book the predicted achievable fill (unchanged). **Live** places the
+limit-at-ask taker, then **confirms the actual fill from `/portfolio/positions` before/after deltas**
+(mirrors the proven `execution.py` C1/W3 path — *not* `get_order`-by-id), polling `FILL_POLL_TRIES=3 ×
+700 ms` for the matching engine to settle, and computes the *marginal* VWAP (backing out any pre-order
+holding). **Partial** ⇒ book what filled + cancel the resting remainder; **zero / positions-unreadable**
+⇒ cancel best-effort, record **no** position and **don't burn the daily cap** (unreadable logs CRITICAL →
+reconcile). `OpenPosition` now carries the realized fill; `settle_pnl` reads those fields unchanged. New
+`wa-kalshi` methods `positions()` (typed `/portfolio/positions`) + `cancel_order()` (`DELETE`), with a
+`PositionHeld` parser (`position_fp`/`market_exposure_dollars` + legacy fallback). Also folded in a **G6
+fat-finger guard** (refuse the order if `yes_ask ∉ (0,1)`). **Touched:** `wa-kalshi` (lib+parse+test),
+`wa-exec` (execute/confirm+test), `main.rs`. **Tests +2 → suite 34, clippy-clean, binary rebuilt + still
+UNARMED.**
+
+**Arming order:** ~~G1/G2 (BLOCKERs)~~ ✅ done → **G3/G4 next** (journal-before-place + startup
+reconciliation; G4 also absorbs the drift detector) → G5/G7 (cheap) → G8–G12 (ops polish) → canary fill
+(G11) → flip `--live`.
 
 ## 7. Reproduce
 ```
@@ -552,7 +628,7 @@ python scripts/lowtemp_2city_algo.py --tau 0.93               # §6f 2-uncorrela
 python scripts/lowtemp_anchor_sweep.py --rebuild              # §6f low-temp anchor sweep (-> 22:00)
 python scripts/directional_preset.py --preset hightemp17      # §6f LOCKED preset: high-temp @17:00
 python scripts/directional_preset.py --preset lowtemp22       # §6f LOCKED preset: low-temp @22:00
-cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (31)
+cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (34)
 cargo run --manifest-path rust/Cargo.toml -p wa-engine -- --once --dry-run   # §6i live smoke (no orders)
 powershell -File deploy/build-engine.ps1                       # §6i build the Rust Linux binary (WSL)
 ```

@@ -53,12 +53,6 @@ fn main() -> Result<()> {
     };
 
     let client = build_client(&cfg, mode)?;
-    if mode == Mode::Live {
-        match client.balance_cents() {
-            Ok(c) => tracing::info!("live account balance ${:.2}", c as f64 / 100.0),
-            Err(e) => tracing::warn!("balance fetch failed (read path): {e}"),
-        }
-    }
 
     let mut state = match EngineState::load(&cfg.state_path)? {
         Some(s) => s,
@@ -67,6 +61,16 @@ fn main() -> Result<()> {
             EngineState::new(cfg.bankroll_init)
         }
     };
+
+    // LIVE sizes off the REAL account, never config (lesson #11): adopt balance × live_alloc_frac as
+    // the single shared bankroll both markets size from. Fatal if the balance can't be read — never
+    // arm blind on a config number.
+    if mode == Mode::Live {
+        let bal = client
+            .balance_cents()
+            .context("LIVE requires a /portfolio/balance read at activation (lesson #11)")?;
+        adopt_live_bankroll(&cfg, &mut state, bal);
+    }
 
     tracing::info!(
         mode = mode.as_str(),
@@ -98,6 +102,37 @@ fn build_client(cfg: &Config, mode: Mode) -> Result<KalshiClient> {
     KalshiClient::new(&cfg.api_base, signer)
 }
 
+/// Set the shared LIVE bankroll from the real balance (cents) × `live_alloc_frac`. Logs the new
+/// figure on a change and stays quiet otherwise (the per-loop resync calls this every pass).
+fn adopt_live_bankroll(cfg: &Config, state: &mut EngineState, balance_cents: i64) {
+    let bal = balance_cents as f64 / 100.0;
+    let alloc = bal * cfg.live_alloc_frac;
+    let changed = state.live_bankroll != Some(alloc);
+    state.live_bankroll = Some(alloc);
+    if changed {
+        tracing::info!(
+            balance = format!("{:.2}", bal),
+            alloc_pct = format!("{:.0}%", cfg.live_alloc_frac * 100.0),
+            live_bankroll = format!("{:.2}", alloc),
+            "live bankroll synced to account"
+        );
+    }
+}
+
+/// Re-sync the shared LIVE bankroll to the real account after settlements (the exchange is truth).
+/// No-op outside live; on a balance-read failure keep the prior value (never zero a live bankroll).
+fn sync_live_bankroll(cfg: &Config, mode: Mode, client: &KalshiClient, state: &mut EngineState) {
+    if mode != Mode::Live {
+        return;
+    }
+    match client.balance_cents() {
+        Ok(c) => adopt_live_bankroll(cfg, state, c),
+        Err(e) => {
+            tracing::warn!("live balance resync failed (keeping ${:?}): {e}", state.live_bankroll)
+        }
+    }
+}
+
 /// Resident scheduler loop: process the soonest due anchor inside its window, sleep otherwise.
 fn run_resident(
     cfg: &Config,
@@ -110,6 +145,7 @@ fn run_resident(
     loop {
         let now = Utc::now();
         settle_open(cfg, client, state);
+        sync_live_bankroll(cfg, mode, client, state);
         state.save(&cfg.state_path)?;
 
         let upcoming = wa_schedule::upcoming(cities, now - window, 2);
@@ -214,9 +250,16 @@ fn process_anchor(
         }
     };
 
+    let live_bankroll = state.live_bankroll; // Copy Option<f64>; read before the &mut book borrow
     let (bankroll, entries) = {
         let book = state.book(market);
-        (book.bankroll_usd, book.entries_today(date))
+        // LIVE: both markets size off ONE shared bankroll (the real account). Paper/dry-run keep the
+        // per-market Book bankroll. (Book bankrolls still roll independently for the drawdown halts.)
+        let bankroll = match mode {
+            Mode::Live => live_bankroll.unwrap_or(book.bankroll_usd),
+            _ => book.bankroll_usd,
+        };
+        (bankroll, book.entries_today(date))
     };
     let acfg = cfg.algo();
     let fav = wa_book::favorite(&quotes).map(|i| (quotes[i].ticker.clone(), quotes[i].mid()));
@@ -244,10 +287,19 @@ fn process_anchor(
                 return;
             }
             let coid = format!("wa-{}-{}", entry.ticker, date);
-            let order_id = match wa_exec::place_if_live(mode, client, &entry, &coid) {
-                Ok(oid) => oid,
+            let (order_id, contracts, fill_vwap) = match wa_exec::execute(mode, client, &entry, &coid) {
+                Ok(wa_exec::Execution::Filled { order_id, contracts, fill_vwap }) => {
+                    (order_id, contracts, fill_vwap)
+                }
+                Ok(wa_exec::Execution::NoFill) => {
+                    // Live order didn't cross (or nothing fillable) — book no position, don't burn the
+                    // daily cap on a no-trade. Paper/dry-run never return NoFill.
+                    tracing::warn!(market, city = %a.city_name, ticker = %entry.ticker, "NO FILL — no position recorded");
+                    log_event(&cfg.log_path, skip_row(a, &event_ticker, "no_fill", Some(entry.mid), quotes.len()));
+                    return;
+                }
                 Err(e) => {
-                    tracing::error!("place_order failed for {}: {e}", entry.ticker);
+                    tracing::error!("execute failed for {}: {e}", entry.ticker);
                     log_event(&cfg.log_path, skip_row(a, &event_ticker, "order_error", Some(entry.mid), quotes.len()));
                     return;
                 }
@@ -266,9 +318,9 @@ fn process_anchor(
                 yes_ask: entry.yes_ask,
                 stake_usd: entry.stake_usd,
                 intended_contracts: entry.want_contracts,
-                fillable_contracts: entry.feasibility.fillable_contracts,
-                fill_vwap: entry.feasibility.fill_vwap,
-                fillable_pct: entry.feasibility.fillable_pct,
+                fillable_contracts: contracts, // realized fill (live) / predicted achievable (paper)
+                fill_vwap,                     // realized VWAP (live) / predicted (paper)
+                fillable_pct: entry.feasibility.fillable_pct, // depth context at decision time
                 ladder_depth_usd: entry.feasibility.ladder_depth_usd,
                 mode: mode.as_str().to_string(),
                 order_id,
@@ -287,6 +339,7 @@ fn process_anchor(
                 ticker = %pos.ticker,
                 conf = format!("{:.3}", pos.mid),
                 ask = pos.yes_ask,
+                contracts = format!("{:.0}", pos.fillable_contracts),
                 fillable = format!("{:.0}%", pos.fillable_pct * 100.0),
                 order = ?pos.order_id,
                 "ENTER"

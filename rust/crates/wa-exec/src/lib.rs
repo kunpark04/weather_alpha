@@ -2,14 +2,22 @@
 //!
 //! * `DryRun` — decide + log, place nothing (the safe default for `--once`).
 //! * `Paper` — record the intended fill (no order); P&L booked at the achievable fill.
-//! * `Live` — place a real limit-at-ask taker order for the fillable size (gated by the kill switch
-//!   + the Book's halts, which the engine checks first).
+//! * `Live` — place a real limit-at-ask taker for the fillable size (the kill switch and the Book's
+//!   halts are checked first), then **confirm the actual fill** from `/portfolio/positions` and book
+//!   only what truly filled, cancelling any resting remainder.
 
 use anyhow::Result;
 use std::path::Path;
+use std::time::Duration;
 use wa_algo::Entry;
 use wa_kalshi::KalshiClient;
 use wa_state::OpenPosition;
+
+/// Fill-confirmation poll budget. A marketable limit usually fills within ~1 s, but
+/// `/portfolio/positions` can lag the matching engine — poll a few times before concluding the order
+/// is resting. Mirrors `execution.py` `_FILL_POLL_TRIES` / `_FILL_POLL_DELAY_S`. LIVE-only.
+const FILL_POLL_TRIES: u32 = 3;
+const FILL_POLL_DELAY: Duration = Duration::from_millis(700);
 
 /// Run mode for the engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,32 +50,121 @@ pub fn kill_switch_active(path: &Path) -> bool {
     path.exists()
 }
 
-/// Place a real order iff `mode == Live`. Buys the fillable size at a limit equal to the favorite's
-/// best yes-ask (a limit-at-ask taker, per CLAUDE.md lesson #13 — no maker leg). Returns the order id
-/// (None for paper/dry-run or when nothing is fillable).
-pub fn place_if_live(
+/// Outcome of executing one decided entry — what (if anything) to record as an open position.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Execution {
+    /// A position to book. For paper/dry-run `contracts`/`fill_vwap` are the *predicted* achievable
+    /// fill (the depth walk); for live they are the **confirmed** exchange fill.
+    Filled { order_id: Option<String>, contracts: f64, fill_vwap: Option<f64> },
+    /// Nothing to book — nothing was fillable, or a live order didn't cross and was cancelled.
+    NoFill,
+}
+
+/// Route one decided entry to the active mode. Paper/dry-run book the predicted achievable fill (no
+/// order). Live places a limit-at-ask taker for the fillable size (a limit-at-ask taker, per CLAUDE.md
+/// lesson #13 — no maker leg), then **confirms the actual fill** from `/portfolio/positions` rather
+/// than assuming the full size filled at our limit; a resting/partial order books only what truly
+/// filled and the remainder is cancelled (port of `execution.py` C1/W3).
+pub fn execute(
     mode: Mode,
     client: &KalshiClient,
     entry: &Entry,
     client_order_id: &str,
-) -> Result<Option<String>> {
-    if mode != Mode::Live {
-        return Ok(None);
+) -> Result<Execution> {
+    match mode {
+        Mode::DryRun | Mode::Paper => Ok(Execution::Filled {
+            order_id: None,
+            contracts: entry.feasibility.fillable_contracts,
+            fill_vwap: entry.feasibility.fill_vwap,
+        }),
+        Mode::Live => place_and_confirm(client, entry, client_order_id),
     }
+}
+
+fn place_and_confirm(client: &KalshiClient, entry: &Entry, coid: &str) -> Result<Execution> {
     let count = entry.feasibility.fillable_contracts.floor() as i64;
     if count <= 0 {
         tracing::warn!(ticker = %entry.ticker, "live: nothing fillable at/under cap — no order");
-        return Ok(None);
+        return Ok(Execution::NoFill);
+    }
+    // Fat-finger guard: a garbage ask (≤0 or ≥1) must never become a real limit order.
+    if !(entry.yes_ask > 0.0 && entry.yes_ask < 1.0) {
+        tracing::error!(ticker = %entry.ticker, yes_ask = entry.yes_ask, "live: yes_ask outside (0,1) — refusing order");
+        return Ok(Execution::NoFill);
     }
     let limit_cents = (entry.yes_ask * 100.0).round() as i64;
-    let ack = client.place_order(&entry.ticker, "yes", "buy", count, limit_cents, client_order_id)?;
+    // Pre-order holding (the engine is normally flat on a fresh event-date ticker, but confirm via
+    // before/after deltas like the Python path so topping up an existing holding can't double-count).
+    let (before_qty, before_avg, _) = held(client, &entry.ticker);
+    let ack = client.place_order(&entry.ticker, "yes", "buy", count, limit_cents, coid)?;
     let order_id = ack
         .get("order")
         .and_then(|o| o.get("order_id"))
         .or_else(|| ack.get("order_id"))
         .and_then(|v| v.as_str())
         .map(String::from);
-    Ok(order_id)
+
+    // Confirm the ACTUAL fill from the exchange (positions can lag the match → poll).
+    let (mut filled, mut price_cents, mut confirmed) = (0i64, limit_cents, false);
+    for attempt in 0..FILL_POLL_TRIES {
+        let (after_qty, after_avg, read_ok) = held(client, &entry.ticker);
+        if read_ok {
+            confirmed = true;
+            filled = (after_qty - before_qty).max(0);
+            if filled > 0 {
+                // Marginal price of THIS fill (back out the pre-order holding), not the blended avg.
+                let marginal = (after_qty * after_avg - before_qty * before_avg) as f64 / filled as f64;
+                price_cents = if marginal > 0.0 { marginal.round() as i64 } else { limit_cents };
+                break;
+            }
+        }
+        if attempt + 1 < FILL_POLL_TRIES {
+            std::thread::sleep(FILL_POLL_DELAY);
+        }
+    }
+
+    if !confirmed {
+        // Positions unreadable on every attempt — we cannot tell if it filled. Cancel best-effort and
+        // book NOTHING (never a phantom); if it did fill it's an orphan until reconciliation (G4), so
+        // surface it loudly.
+        cancel_quietly(client, &order_id);
+        tracing::error!(ticker = %entry.ticker, order = ?order_id, "LIVE: fill unconfirmable (positions unreadable) — cancelled best-effort, booked nothing; RECONCILE MANUALLY");
+        return Ok(Execution::NoFill);
+    }
+    if filled <= 0 {
+        cancel_quietly(client, &order_id); // retract the resting order so it can't fill after we move on
+        tracing::warn!(ticker = %entry.ticker, order = ?order_id, tries = FILL_POLL_TRIES, "LIVE: no fill — cancelled resting order");
+        return Ok(Execution::NoFill);
+    }
+    if filled < count {
+        cancel_quietly(client, &order_id); // partial — retract the remainder so it can't fill after booking
+        tracing::warn!(ticker = %entry.ticker, filled, requested = count, "LIVE: partial fill — cancelled remainder");
+    }
+    Ok(Execution::Filled { order_id, contracts: filled as f64, fill_vwap: Some(price_cents as f64 / 100.0) })
+}
+
+/// `(contracts, avg_price_cents, read_ok)` held for `ticker` on the YES side. `read_ok` is false when
+/// the positions call errored, so the caller keeps polling instead of misreading a transient flat.
+fn held(client: &KalshiClient, ticker: &str) -> (i64, i64, bool) {
+    match client.positions() {
+        Ok(ps) => ps
+            .iter()
+            .find(|p| p.ticker == ticker && p.side == "yes")
+            .map(|p| (p.contracts, p.avg_price_cents, true))
+            .unwrap_or((0, 0, true)),
+        Err(e) => {
+            tracing::warn!(ticker, "positions read failed during fill confirm: {e}");
+            (0, 0, false)
+        }
+    }
+}
+
+fn cancel_quietly(client: &KalshiClient, order_id: &Option<String>) {
+    if let Some(id) = order_id {
+        if let Err(e) = client.cancel_order(id) {
+            tracing::warn!(order = %id, "cancel_order failed (best-effort): {e}");
+        }
+    }
 }
 
 /// Settlement P&L for a paper/live pick, booked at the achievable fill (VWAP if we walked the
@@ -154,5 +251,28 @@ mod tests {
         assert_eq!(Mode::parse("LIVE"), Some(Mode::Live));
         assert_eq!(Mode::parse("dry-run"), Some(Mode::DryRun));
         assert_eq!(Mode::parse("nope"), None);
+    }
+
+    #[test]
+    fn paper_and_dryrun_book_predicted_fill_without_network() {
+        // A keyless client: any signed call would error, so passing this proves paper/dry-run never
+        // hit the network — they book the predicted (achievable) fill straight from the feasibility.
+        let client = KalshiClient::new(wa_kalshi::DEFAULT_API_BASE, None).unwrap();
+        let entry = Entry {
+            ticker: "T-FAV".into(),
+            subtitle: String::new(),
+            mid: 0.94,
+            yes_ask: 0.95,
+            stake_usd: 41.67,
+            want_contracts: 43.86,
+            feasibility: wa_book::Feasibility {
+                fillable_contracts: 40.0,
+                fill_vwap: Some(0.95),
+                ..Default::default()
+            },
+        };
+        let want = Execution::Filled { order_id: None, contracts: 40.0, fill_vwap: Some(0.95) };
+        assert_eq!(execute(Mode::Paper, &client, &entry, "wa-T-FAV-2026-06-16").unwrap(), want);
+        assert_eq!(execute(Mode::DryRun, &client, &entry, "wa-T-FAV-2026-06-16").unwrap(), want);
     }
 }

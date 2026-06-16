@@ -12,6 +12,7 @@ mod auth;
 mod parse;
 
 pub use auth::Signer;
+pub use parse::PositionHeld;
 pub use wa_book::{Level, OrderBook, Quote};
 
 use anyhow::{anyhow, Result};
@@ -165,6 +166,20 @@ impl KalshiClient {
     /// avoid over-modeling a schema the core loop doesn't need.
     pub fn positions_raw(&self) -> Result<Value> {
         self.signed(reqwest::Method::GET, "/portfolio/positions", None)
+    }
+
+    /// Typed held positions (`/portfolio/positions`) — the exchange-truth source for LIVE fill
+    /// confirmation (mirrors `kalshi.get_positions`).
+    pub fn positions(&self) -> Result<Vec<PositionHeld>> {
+        let data = self.signed(reqwest::Method::GET, "/portfolio/positions", None)?;
+        Ok(parse::positions_from_value(&data))
+    }
+
+    /// Cancel a resting order (`DELETE /portfolio/orders/{id}`). Used to retract the unfilled
+    /// remainder of a partial fill / a non-marketable order so it can't fill after we've booked.
+    pub fn cancel_order(&self, order_id: &str) -> Result<Value> {
+        tracing::info!(order_id, "cancel_order");
+        self.signed(reqwest::Method::DELETE, &format!("/portfolio/orders/{order_id}"), None)
     }
 
     /// Place a limit order (`POST /portfolio/orders`). LIVE-only; mirrors `kalshi.place_order`.

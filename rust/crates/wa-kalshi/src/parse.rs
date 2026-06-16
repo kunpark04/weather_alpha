@@ -90,6 +90,47 @@ pub fn balance_cents(data: &Value) -> i64 {
     data.get("balance").and_then(|v| v.as_i64()).unwrap_or(0)
 }
 
+/// One held market position from a `/portfolio/positions` response — the exchange-truth source for
+/// LIVE fill confirmation (never trust the local Book for what actually filled). Port of
+/// `kalshi.KalshiPosition` / `_parse_positions`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PositionHeld {
+    pub ticker: String,
+    pub side: String, // "yes" | "no"
+    pub contracts: i64,
+    pub avg_price_cents: i64,
+}
+
+/// Held positions from a `/portfolio/positions` response. Prefers the current `position_fp` (signed
+/// fixed-point count, +YES / −NO) + `market_exposure_dollars`, falling back to the legacy integer
+/// `position` + `market_exposure` (cents); flat (qty 0) rows are dropped. Mirrors `_parse_positions`.
+pub fn positions_from_value(data: &Value) -> Vec<PositionHeld> {
+    let Some(arr) = data.get("market_positions").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for p in arr {
+        let (qty, exposure_cents) = if let Some(posfp) = p.get("position_fp").and_then(as_num) {
+            let exp = p.get("market_exposure_dollars").and_then(as_num).unwrap_or(0.0);
+            (posfp.round() as i64, (exp * 100.0).round() as i64)
+        } else {
+            let q = p.get("position").and_then(|v| v.as_i64()).unwrap_or(0);
+            let e = p.get("market_exposure").and_then(|v| v.as_i64()).unwrap_or(0);
+            (q, e)
+        };
+        if qty == 0 {
+            continue;
+        }
+        out.push(PositionHeld {
+            ticker: str_field(p, "ticker").unwrap_or("").to_string(),
+            side: if qty > 0 { "yes".into() } else { "no".into() },
+            contracts: qty.abs(),
+            avg_price_cents: exposure_cents / qty.abs().max(1),
+        });
+    }
+    out
+}
+
 /// The single ticker that settled `yes` for an event, else None (not settled / ambiguous).
 /// Mirrors `directional_paper.settlement_winner`: prefer `settlement_value`, else `result`.
 pub fn settlement_winner(markets: &[Value]) -> Option<String> {
@@ -164,6 +205,24 @@ mod tests {
     fn balance_prefers_dollars() {
         assert_eq!(balance_cents(&json!({"balance_dollars":"17.82"})), 1782);
         assert_eq!(balance_cents(&json!({"balance":2356})), 2356);
+    }
+
+    #[test]
+    fn positions_parse_fp_and_legacy_shapes() {
+        // current API: signed `position_fp` (+YES) + `market_exposure_dollars`; avg = exposure/qty.
+        let data = json!({"market_positions":[
+            {"ticker":"T-YES","position_fp":"5","market_exposure_dollars":"4.75"},
+            {"ticker":"T-FLAT","position_fp":"0","market_exposure_dollars":"0"}, // dropped
+        ]});
+        let ps = positions_from_value(&data);
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0], PositionHeld { ticker: "T-YES".into(), side: "yes".into(), contracts: 5, avg_price_cents: 95 });
+        // legacy: integer `position` (−NO) + `market_exposure` cents.
+        let legacy = json!({"market_positions":[{"ticker":"T-NO","position":-3,"market_exposure":120}]});
+        let lp = positions_from_value(&legacy);
+        assert_eq!(lp[0], PositionHeld { ticker: "T-NO".into(), side: "no".into(), contracts: 3, avg_price_cents: 40 });
+        // no market_positions key -> empty
+        assert!(positions_from_value(&json!({})).is_empty());
     }
 
     #[test]

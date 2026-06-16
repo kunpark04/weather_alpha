@@ -146,6 +146,13 @@ pub struct EngineState {
     pub processed: Vec<String>,
     #[serde(default)]
     pub processed_date: Option<NaiveDate>,
+    /// Single shared LIVE sizing bankroll = real balance × `live_alloc_frac`, adopted at activation
+    /// and resynced after each settlement (lesson #11; the exchange is truth). `None` in
+    /// paper/dry-run, where the per-market `Book.bankroll_usd` is used instead. One figure for both
+    /// markets because LIVE draws on one real Kalshi account. (Per-market Book bankrolls still roll
+    /// for the orthogonal drawdown halts.)
+    #[serde(default)]
+    pub live_bankroll: Option<f64>,
 }
 
 impl EngineState {
@@ -155,6 +162,7 @@ impl EngineState {
             low: Book::new(init_bankroll),
             processed: Vec::new(),
             processed_date: None,
+            live_bankroll: None,
         }
     }
 

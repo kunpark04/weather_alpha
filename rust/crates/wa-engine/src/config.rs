@@ -27,6 +27,11 @@ pub struct Config {
     pub anchor_window_min: i64,
     #[serde(default = "default_poll")]
     pub poll_interval_sec: u64,
+    /// Fraction of the real Kalshi balance to allocate as the single shared LIVE sizing bankroll
+    /// (set at deploy; 1.0 = the whole account, 0.5 = half). Both markets size off this one figure.
+    /// Paper/dry-run ignore it (they use the per-market `bankroll_init`).
+    #[serde(default = "default_live_alloc")]
+    pub live_alloc_frac: f64,
     pub algo: AlgoToml,
     pub cities: Vec<CityToml>,
 }
@@ -68,6 +73,9 @@ fn default_window() -> i64 {
 }
 fn default_poll() -> u64 {
     300
+}
+fn default_live_alloc() -> f64 {
+    1.0
 }
 
 impl Config {

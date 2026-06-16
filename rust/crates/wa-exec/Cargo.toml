@@ -11,3 +11,6 @@ wa-kalshi = { path = "../wa-kalshi" }
 wa-state = { path = "../wa-state" }
 anyhow.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+wa-book = { path = "../wa-book" }

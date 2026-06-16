@@ -29,7 +29,7 @@ This is the same rule the Python paper bot now uses, so paper ≈ live.
 | `wa-exec` | paper/live execution routing + kill switch + settlement P&L |
 | `wa-engine` | the resident daemon binary that wires it together |
 
-Pure crates carry unit tests asserting parity with the Python reference (`cargo test` → 32 tests).
+Pure crates carry unit tests asserting parity with the Python reference (`cargo test` → 34 tests).
 The Kalshi market data path is keyless (public); only `/portfolio/*` + orders are signed.
 
 ## Run

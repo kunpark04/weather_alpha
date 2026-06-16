@@ -11,6 +11,9 @@ key_id_env           = "KALSHI_KEY_ID"            # only read in --live
 private_key_path_env = "KALSHI_PRIVATE_KEY_PATH"  # only read in --live
 anchor_window_min    = 60         # process an anchor within 60 min; no off-anchor catch-up after
 poll_interval_sec    = 300
+live_alloc_frac      = 1.0         # LIVE only: fraction of the REAL Kalshi balance to size off
+                                   # (single shared bankroll for both markets). Set at deploy; 1.0 =
+                                   # whole account. Paper/dry-run ignore it (use bankroll_init).
 
 [algo]
 band_lo        = 0.93

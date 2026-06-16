@@ -1551,6 +1551,7 @@ dependencies = [
  "anyhow",
  "tracing",
  "wa-algo",
+ "wa-book",
  "wa-fees",
  "wa-kalshi",
  "wa-state",

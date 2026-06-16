@@ -462,7 +462,7 @@ a paper shadow that share one **executable rule** (no cross-city look-ahead): fa
 each entry = `stake_fraction/cap` = **16.67%** slot; P&L at the achievable fill, net of fee.
 
 - **LIVE = Rust** (`rust/`, see `rust/README.md`): a modular cargo workspace (`wa-fees/book/algo/
-  kalshi/schedule/state/exec/engine`), 40 parity tests vs the Python, clippy-clean, live-smoke-tested
+  kalshi/schedule/state/exec/engine`), 42 parity tests vs the Python, clippy-clean, live-smoke-tested
   (keyless fetch → favorite → band → feasibility → log). Resident daemon wakes at each city's local
   anchor, fetches the live book, decides, and is real-order-capable (RSA-PSS auth, limit-at-ask taker)
   but **ships built + UNARMED** (`deploy/wa-engine.service`, `deploy/build-engine.{sh,ps1}`). Built as
@@ -574,11 +574,11 @@ disabled). This is the safety/confirmation audit gating the `--paper`→`--live`
 | ✅ DONE | G5 | **No aggregate exposure cap** — only the daily-3 count bounded risk (Python had `total_exposure_max_pct`). | **✓ 2026-06-16** `total_exposure_max_pct` gate (account-wide live / per-market paper) |
 | ✅ DONE | G6 | **No per-order sanity bound** — bad limit could flow into `limit_cents`. | **✓ 2026-06-16** refuse `limit_price ∉ (0,1)` (with Fix-B) |
 | ✅ DONE | G7 | **Limit not guaranteed marketable** — limit = best ask; any uptick ⇒ no cross, and it under-filled vs the cap-walk size. | **✓ 2026-06-16** limit = `cap_price` (aligns with feasibility; marketable through upticks) |
-| 🟡 NICE | G8 | **POST retries on 5xx/timeout** (`wa-kalshi:146`) — double-fill safety rests entirely on Kalshi honoring coid. | Confirm idempotency contract; reconcile on ambiguous fail |
-| 🟡 NICE | G9 | No liveness heartbeat (dead daemon undetectable between anchors). | Health-file touch + watchdog |
-| 🟡 NICE | G10 | No push alerting (order_error/kill/halt/divergence are log-only). | Wire a notifier |
-| 🟡 NICE | G11 | No first-trade canary. | Cap first K live entries to 1 contract (or manual confirm) |
-| 🟡 NICE | G12 | No absolute daily-loss stop (only drawdown-from-peak). | Optional `daily_max_loss_usd` |
+| ✅ DONE | G8 | **POST retried on 5xx/timeout** — double-fill safety rested entirely on Kalshi honoring coid. | **✓ 2026-06-16** `place_order` no-retry (`signed(max_attempts)`=1); coid + G4 reconcile recover a *filled* order |
+| ✅ DONE | G9 | No liveness heartbeat (dead daemon undetectable between anchors). | **✓ 2026-06-16** `write_heartbeat` each resident loop → `heartbeat_path` |
+| ✅ DONE | G10 | No push alerting (order_error/kill/halt/divergence were log-only). | **✓ 2026-06-16** `alert()` sink (ERROR + JSONL `alert_path`) at 5 critical sites |
+| ✅ DONE | G11 | No first-trade canary. | **✓ 2026-06-16** first `canary_trades` live fills capped to `canary_max_contracts` (default 3×1) |
+| ✅ DONE | G12 | No absolute daily-loss stop (only drawdown-from-peak). | **✓ 2026-06-16** `daily_max_loss_usd` account-wide stop (UTC-day; 0=off) |
 
 ### Fix-A — real-balance sync (G2) ✅ Implemented 2026-06-16
 Single shared `EngineState.live_bankroll` (one real Kalshi account) = balance × new config knob
@@ -637,9 +637,36 @@ Fix-B) and keeps live ≈ paper. Also closes **G6** (refuse `limit_price ∉ (0,
 (`Entry.limit_price`), `wa-exec` (limit + guard), `wa-state` (`open_exposure_usd`), `config`/`wa.toml`
 (+`total_exposure_max_pct`), `main.rs` (cap gate). Tests +1 → **suite 40**.
 
-**Arming order:** ~~G1/G2~~ ✅ → ~~G3/G4~~ ✅ → ~~G5/G6/G7~~ ✅ → **G8–G12 (ops polish: heartbeat,
-alerting, canary, daily-loss stop)** → **canary fill (G11)** → flip `--live`. The core safety/correctness
-gaps are now closed; what remains is ops hardening + the deliberate first-fill canary.
+### Fix-G — G8–G12 ops hardening + adversarial review (2026-06-16)
+All five shipped: **G8** `place_order` no-retry (`signed` gained `max_attempts`; order POST passes 1) — never
+blind-retry an ambiguous order POST; coid + G4 reconcile recover a *filled* order. **G9** `write_heartbeat`
+each resident loop. **G10** `alert()` sink (ERROR log + JSONL `alert_path`) at order_error / kill-switch /
+newly-latched halt / reconcile-adoption / unconfirmed-fill (`Execution::NoFill{reason}`). **G11** first-trade
+canary — `EngineState.live_fills`; first `canary_trades` live fills capped to `canary_max_contracts`
+(default 3×1; **adopted orphans count too**; the exposure gate is sized by the canary cost during the
+canary). **G12** `daily_max_loss_usd` account-wide realized-loss stop (UTC-day basis — gate + accumulator
+agree; 0=off). **Touched:** `wa-kalshi` (signed/place_order), `wa-state` (live_fills, daily_pnl), `wa-exec`
+(max_contracts, NoFill reason), `config`/`wa.toml`, `main.rs`.
+
+**Adversarially reviewed** (multi-agent workflow: 4 lenses → per-finding verify; 23 findings, 13 confirmed).
+Fixed the **1 CRITICAL** — config now rejects `canary_max_contracts ≤ 0` (which would have filled 0 contracts
+every live order → `live_fills` never advances → canary never exits → permanent live deadlock) — plus the
+WARNs: adopted orphans now retire a canary slot; the exposure gate uses the canary-capped cost; the
+`place_order` docstring no longer overstates recoverability; the G12 UTC-day basis is documented (keying by
+`event_date` would be wrong — settlements lag the event ~1 day, so the gate would read 0). Tests +2 →
+**suite 42**, clippy-clean, binary rebuilt + UNARMED.
+
+**Two residuals (documented, not silently dropped):**
+- **Resting-order recovery:** positions-only G4 recovers a *filled* order but can't see/cancel a
+  placed-but-still-*resting* one (no list-orders endpoint). Narrow — limit=`cap_price` is marketable and the
+  canary caps early orders to 1 contract — but real for a post-canary full-size order on a network-loss-after-accept.
+  Durable fix needs `GET /portfolio/orders` + cancel-by-coid.
+- **Booked-vs-balance drift alert:** still deferred (needs a per-cycle entry-cost + settlement ledger to
+  avoid false alarms).
+
+**Arming order:** ~~G1–G7~~ ✅ → ~~G8–G12~~ ✅ → **canary fill (G11, automatic on first arm)** → flip
+`--live`. All safety/correctness + ops gaps are closed; the two residuals above are the only known
+follow-ups, neither a blocker for a canary-gated arm.
 
 ## 7. Reproduce
 ```
@@ -658,7 +685,7 @@ python scripts/lowtemp_2city_algo.py --tau 0.93               # §6f 2-uncorrela
 python scripts/lowtemp_anchor_sweep.py --rebuild              # §6f low-temp anchor sweep (-> 22:00)
 python scripts/directional_preset.py --preset hightemp17      # §6f LOCKED preset: high-temp @17:00
 python scripts/directional_preset.py --preset lowtemp22       # §6f LOCKED preset: low-temp @22:00
-cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (40)
+cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (42)
 cargo run --manifest-path rust/Cargo.toml -p wa-engine -- --once --dry-run   # §6i live smoke (no orders)
 powershell -File deploy/build-engine.ps1                       # §6i build the Rust Linux binary (WSL)
 ```

@@ -172,6 +172,16 @@ pub struct EngineState {
     /// cycle/boot. `None` whenever no order is in flight. Live-only.
     #[serde(default)]
     pub pending: Option<OpenPosition>,
+    /// Count of confirmed LIVE fills so far (G11 canary): while below `canary_trades` the engine caps
+    /// each live order to `canary_max_contracts` to exercise the real order path at minimal risk.
+    #[serde(default)]
+    pub live_fills: u32,
+    /// Account-wide realized P&L for the current calendar day (G12 daily-loss stop), reset on a new
+    /// day. New entries are blocked once today's realized loss exceeds `daily_max_loss_usd`.
+    #[serde(default)]
+    pub daily_pnl_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub daily_pnl_usd: f64,
 }
 
 impl EngineState {
@@ -183,6 +193,9 @@ impl EngineState {
             processed_date: None,
             live_bankroll: None,
             pending: None,
+            live_fills: 0,
+            daily_pnl_date: None,
+            daily_pnl_usd: 0.0,
         }
     }
 
@@ -223,6 +236,25 @@ impl EngineState {
     /// uses this to tell a tracked fill from an orphan exchange holding that needs adopting.
     pub fn is_tracked(&self, ticker: &str) -> bool {
         self.high.open.iter().chain(self.low.open.iter()).any(|p| p.ticker == ticker && !p.settled)
+    }
+
+    /// Accumulate a settled position's realized P&L into the current-day total (account-wide, reset
+    /// on a new day). Feeds the G12 daily-loss stop.
+    pub fn record_daily_pnl(&mut self, today: NaiveDate, pnl: f64) {
+        if self.daily_pnl_date != Some(today) {
+            self.daily_pnl_date = Some(today);
+            self.daily_pnl_usd = 0.0;
+        }
+        self.daily_pnl_usd += pnl;
+    }
+
+    /// Realized P&L booked *today* (0 if the accumulator is for another day).
+    pub fn daily_pnl(&self, today: NaiveDate) -> f64 {
+        if self.daily_pnl_date == Some(today) {
+            self.daily_pnl_usd
+        } else {
+            0.0
+        }
     }
 
     /// True if this anchor key was already processed for `date`. Non-mutating: querying a different
@@ -295,6 +327,21 @@ mod tests {
         b.open.push(open_pos("T-A", false)); // 40 × 0.95 = 38.0
         b.open.push(open_pos("T-B", true)); // settled -> excluded
         assert!((b.open_exposure_usd() - 38.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn daily_pnl_accumulates_and_resets_on_new_day() {
+        let mut s = EngineState::new(250.0);
+        let t1 = d(2026, 6, 16);
+        assert_eq!(s.daily_pnl(t1), 0.0);
+        s.record_daily_pnl(t1, -3.0);
+        s.record_daily_pnl(t1, -2.5);
+        assert!((s.daily_pnl(t1) - (-5.5)).abs() < 1e-9);
+        let t2 = d(2026, 6, 17); // new day resets
+        assert_eq!(s.daily_pnl(t2), 0.0);
+        s.record_daily_pnl(t2, 1.0);
+        assert!((s.daily_pnl(t2) - 1.0).abs() < 1e-9);
+        assert_eq!(s.daily_pnl(t1), 0.0); // old day no longer current
     }
 
     #[test]

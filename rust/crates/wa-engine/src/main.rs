@@ -164,8 +164,12 @@ fn reconcile_live(cfg: &Config, mode: Mode, client: &KalshiClient, state: &mut E
     for pos in adoptions {
         let market = pos.market.clone();
         tracing::warn!(market = %market, ticker = %pos.ticker, contracts = pos.fillable_contracts, vwap = ?pos.fill_vwap, "RECON: adopted orphan exchange position");
+        alert(cfg, "reconcile_adopt", &format!("adopted orphan {} ({} contracts) — Book had lost track of a real fill", pos.ticker, pos.fillable_contracts));
         log_event(&cfg.log_path, pos_row(&pos, "RECON"));
         state.book(&market).open.push(pos);
+        // An adopted orphan is a real (recovered) live fill — retire a canary slot like a normal fill,
+        // so a fill that filled-but-couldn't-confirm (or a crash-window fill) still counts toward G11.
+        state.live_fills += 1;
     }
     state.pending = None;
 }
@@ -261,6 +265,7 @@ fn run_resident(
     let window = ChronoDuration::minutes(cfg.anchor_window_min);
     loop {
         let now = Utc::now();
+        write_heartbeat(&cfg.heartbeat_path);
         reconcile_live(cfg, mode, client, state);
         settle_open(cfg, client, state);
         sync_live_bankroll(cfg, mode, client, state);
@@ -361,6 +366,20 @@ fn process_anchor(
         }
     }
 
+    // G12: account-wide daily realized-loss stop (0 = disabled). "Today" is the UTC calendar day; the
+    // gate here and the accumulator in `settle_open` use the SAME UTC basis (settlement time) so they
+    // always agree. This is deliberately distinct from the city-local entry-cap day — keying the stop
+    // by `event_date` would be wrong (settlements lag the event ~1 day, so the gate would read 0). The
+    // few-hours offset from a local session is acceptable for a coarse account-wide loss gate.
+    if cfg.daily_max_loss_usd > 0.0 {
+        let today = Utc::now().date_naive();
+        if state.daily_pnl(today) <= -cfg.daily_max_loss_usd {
+            tracing::warn!(market, city = %a.city_name, today_pnl = format!("{:.2}", state.daily_pnl(today)), cap = cfg.daily_max_loss_usd, "daily-loss stop — skip");
+            log_event(&cfg.log_path, skip_row(a, &event_ticker, "daily_loss_stop", None, 0));
+            return;
+        }
+    }
+
     let quotes = match client.event_quotes(&event_ticker) {
         Ok(q) => q,
         Err(e) => {
@@ -400,19 +419,29 @@ fn process_anchor(
                 wa_algo::Decision::Enter(e) => e,
                 _ => return,
             };
+            // G11 canary: cap the first `canary_trades` LIVE fills to canary_max_contracts each, to
+            // exercise the real order path at minimal risk before full sizing. Paper/dry-run uncapped.
+            let in_canary = mode == Mode::Live && state.live_fills < cfg.canary_trades;
+            let max_contracts = if in_canary { cfg.canary_max_contracts } else { i64::MAX };
             // G5: aggregate exposure cap — bound total open cost beyond the daily entry count.
-            // Account-wide in live (one real account); per-market in paper (independent bankrolls).
+            // Account-wide in live (one real account); per-market in paper. During the canary phase the
+            // order only fills `canary_max_contracts`, so gate on that prospective cost, not full stake.
+            let prospective_cost = if in_canary {
+                cfg.canary_max_contracts as f64 * entry.yes_ask
+            } else {
+                entry.stake_usd
+            };
             let open_exposure = match mode {
                 Mode::Live => state.high.open_exposure_usd() + state.low.open_exposure_usd(),
                 _ if market == "high" => state.high.open_exposure_usd(),
                 _ => state.low.open_exposure_usd(),
             };
-            if open_exposure + entry.stake_usd > cfg.total_exposure_max_pct * bankroll {
+            if open_exposure + prospective_cost > cfg.total_exposure_max_pct * bankroll {
                 tracing::warn!(
                     market,
                     city = %a.city_name,
                     open = format!("{:.2}", open_exposure),
-                    add = format!("{:.2}", entry.stake_usd),
+                    add = format!("{:.2}", prospective_cost),
                     cap = format!("{:.2}", cfg.total_exposure_max_pct * bankroll),
                     "exposure cap — skip"
                 );
@@ -421,6 +450,7 @@ fn process_anchor(
             }
             if mode == Mode::Live && wa_exec::kill_switch_active(&cfg.kill_switch_path) {
                 tracing::warn!("KILL_SWITCH active — not placing live order for {}", entry.ticker);
+                alert(cfg, "kill_switch", &format!("kill switch active while {} would trade", entry.ticker));
                 log_event(&cfg.log_path, skip_row(a, &event_ticker, "kill_switch", Some(entry.mid), quotes.len()));
                 return;
             }
@@ -462,20 +492,24 @@ fn process_anchor(
                     return;
                 }
             }
-            let (order_id, contracts, fill_vwap) = match wa_exec::execute(mode, client, &entry, &coid) {
+            let (order_id, contracts, fill_vwap) = match wa_exec::execute(mode, client, &entry, &coid, max_contracts) {
                 Ok(wa_exec::Execution::Filled { order_id, contracts, fill_vwap }) => {
                     (order_id, contracts, fill_vwap)
                 }
-                Ok(wa_exec::Execution::NoFill) => {
-                    // Live order didn't cross (or nothing fillable) — book no position, don't burn the
-                    // daily cap on a no-trade. Paper/dry-run never return NoFill.
+                Ok(wa_exec::Execution::NoFill { reason }) => {
+                    // Nothing booked — don't burn the daily cap on a no-trade. Paper/dry-run never
+                    // return NoFill. Alert if a placed order's fill couldn't be verified.
                     state.pending = None;
-                    tracing::warn!(market, city = %a.city_name, ticker = %entry.ticker, "NO FILL — no position recorded");
-                    log_event(&cfg.log_path, skip_row(a, &event_ticker, "no_fill", Some(entry.mid), quotes.len()));
+                    if reason == "unconfirmed" {
+                        alert(cfg, "unconfirmed_fill", &format!("{} placed but fill unconfirmable — reconcile", entry.ticker));
+                    }
+                    tracing::warn!(market, city = %a.city_name, ticker = %entry.ticker, reason, "NO FILL — no position recorded");
+                    log_event(&cfg.log_path, skip_row(a, &event_ticker, reason, Some(entry.mid), quotes.len()));
                     return;
                 }
                 Err(e) => {
                     state.pending = None;
+                    alert(cfg, "order_error", &format!("place/confirm failed for {}: {e}", entry.ticker));
                     tracing::error!("execute failed for {}: {e}", entry.ticker);
                     log_event(&cfg.log_path, skip_row(a, &event_ticker, "order_error", Some(entry.mid), quotes.len()));
                     return;
@@ -490,6 +524,12 @@ fn process_anchor(
                 book.open.push(pos.clone());
             }
             state.pending = None; // intent fulfilled and recorded; clear the journal
+            if mode == Mode::Live {
+                state.live_fills += 1; // a confirmed live fill — counts toward leaving the canary phase
+                if in_canary {
+                    tracing::info!(market, city = %a.city_name, live_fills = state.live_fills, canary = cfg.canary_trades, "canary fill recorded (capped to {} contract(s))", cfg.canary_max_contracts);
+                }
+            }
             tracing::info!(
                 market,
                 city = %a.city_name,
@@ -509,6 +549,7 @@ fn process_anchor(
 /// Settle every open position whose event has settled, across both markets. Books P&L, rolls the
 /// per-market bankroll (updating halts), logs a SETTLE row, and drops settled rows from `open`.
 fn settle_open(cfg: &Config, client: &KalshiClient, state: &mut EngineState) {
+    let mut booked_total = 0.0_f64; // account-wide realized P&L this pass (feeds the G12 daily stop)
     for market in ["high", "low"] {
         let book = state.book(market);
         if book.open.iter().all(|p| p.settled) {
@@ -535,10 +576,20 @@ fn settle_open(cfg: &Config, client: &KalshiClient, state: &mut EngineState) {
         let mut settled_rows: Vec<OpenPosition> = Vec::new();
         for (i, win, pnl) in updates {
             let city = book.open[i].city.clone();
+            let (was_acct, was_city) = (book.account_halted(), book.city_halted(&city));
             book.open[i].settled = true;
             book.open[i].win = Some(win);
             book.open[i].pnl_usd = Some(pnl);
             book.book_settlement(&city, pnl);
+            booked_total += pnl;
+            // G10: alert when a drawdown halt newly latches (operator must `scripts/halt.py --reset`).
+            if !was_acct && book.account_halted() {
+                let br = book.bankroll_usd;
+                alert(cfg, "account_halt", &format!("{market} account halt latched (bankroll ${br:.2})"));
+            }
+            if !was_city && book.city_halted(&city) {
+                alert(cfg, "city_halt", &format!("{market}/{city} halt latched"));
+            }
             settled_rows.push(book.open[i].clone());
         }
         let bankroll = book.bankroll_usd;
@@ -549,6 +600,10 @@ fn settle_open(cfg: &Config, client: &KalshiClient, state: &mut EngineState) {
             row["bankroll_after"] = json!(bankroll);
             log_event(&cfg.log_path, row);
         }
+    }
+    // G12: roll today's account-wide realized P&L for the daily-loss stop.
+    if booked_total != 0.0 {
+        state.record_daily_pnl(Utc::now().date_naive(), booked_total);
     }
 }
 
@@ -607,6 +662,22 @@ fn log_event(path: &PathBuf, row: serde_json::Value) {
         use std::io::Write;
         let _ = writeln!(f, "{row}");
     }
+}
+
+/// G9: touch the heartbeat file with the current UTC timestamp (best-effort) so an external watchdog
+/// can detect a dead daemon between anchors.
+fn write_heartbeat(path: &Path) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, now_iso());
+}
+
+/// G10: emit a critical alert — an ERROR log line + an append-only JSONL record to `alert_path` for an
+/// external process to tail and push (email/SMS/Slack). Best-effort; never fails the caller.
+fn alert(cfg: &Config, kind: &str, msg: &str) {
+    tracing::error!(kind, "ALERT: {msg}");
+    log_event(&cfg.alert_path, json!({ "ts": now_iso(), "kind": kind, "msg": msg }));
 }
 
 #[cfg(test)]

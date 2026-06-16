@@ -115,12 +115,21 @@ impl KalshiClient {
 
     // ---- signed (authenticated) endpoints ------------------------------------------------------
 
-    fn signed(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
+    /// Signed request with a caller-chosen retry budget. Idempotent reads (balance/positions) and the
+    /// idempotent cancel use `SIGNED_RETRIES`; `place_order` passes `1` (see its docstring — never
+    /// blind-retry an order POST).
+    fn signed(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        max_attempts: u32,
+    ) -> Result<Value> {
         let signer = self.signer.as_ref().ok_or_else(|| anyhow!("client is not authenticated"))?;
         let url = self.url(path);
         let signed_path = format!("{}{}", self.base_path, path);
         let mut delay = Duration::from_millis(500);
-        for attempt in 0..SIGNED_RETRIES {
+        for attempt in 0..max_attempts {
             let ts = now_ms();
             let sig = signer.sign(ts, method.as_str(), &signed_path);
             let mut req = self
@@ -136,7 +145,7 @@ impl KalshiClient {
             let r = match req.send() {
                 Ok(r) => r,
                 Err(e) => {
-                    if attempt + 1 >= SIGNED_RETRIES {
+                    if attempt + 1 >= max_attempts {
                         return Err(e.into());
                     }
                     std::thread::sleep(delay);
@@ -144,7 +153,7 @@ impl KalshiClient {
                     continue;
                 }
             };
-            if r.status().is_server_error() && attempt + 1 < SIGNED_RETRIES {
+            if r.status().is_server_error() && attempt + 1 < max_attempts {
                 std::thread::sleep(delay);
                 delay *= 2;
                 continue;
@@ -158,20 +167,20 @@ impl KalshiClient {
 
     /// Account balance in cents (`/portfolio/balance`). The LIVE bankroll source of truth.
     pub fn balance_cents(&self) -> Result<i64> {
-        let data = self.signed(reqwest::Method::GET, "/portfolio/balance", None)?;
+        let data = self.signed(reqwest::Method::GET, "/portfolio/balance", None, SIGNED_RETRIES)?;
         Ok(parse::balance_cents(&data))
     }
 
     /// Raw held positions (`/portfolio/positions`) for reconciliation. Returned as the raw JSON to
     /// avoid over-modeling a schema the core loop doesn't need.
     pub fn positions_raw(&self) -> Result<Value> {
-        self.signed(reqwest::Method::GET, "/portfolio/positions", None)
+        self.signed(reqwest::Method::GET, "/portfolio/positions", None, SIGNED_RETRIES)
     }
 
     /// Typed held positions (`/portfolio/positions`) — the exchange-truth source for LIVE fill
     /// confirmation (mirrors `kalshi.get_positions`).
     pub fn positions(&self) -> Result<Vec<PositionHeld>> {
-        let data = self.signed(reqwest::Method::GET, "/portfolio/positions", None)?;
+        let data = self.signed(reqwest::Method::GET, "/portfolio/positions", None, SIGNED_RETRIES)?;
         Ok(parse::positions_from_value(&data))
     }
 
@@ -179,10 +188,18 @@ impl KalshiClient {
     /// remainder of a partial fill / a non-marketable order so it can't fill after we've booked.
     pub fn cancel_order(&self, order_id: &str) -> Result<Value> {
         tracing::info!(order_id, "cancel_order");
-        self.signed(reqwest::Method::DELETE, &format!("/portfolio/orders/{order_id}"), None)
+        self.signed(reqwest::Method::DELETE, &format!("/portfolio/orders/{order_id}"), None, SIGNED_RETRIES)
     }
 
     /// Place a limit order (`POST /portfolio/orders`). LIVE-only; mirrors `kalshi.place_order`.
+    ///
+    /// **No retry** (`max_attempts=1`): on an ambiguous failure (5xx / network timeout) the order may
+    /// already have reached the matching engine, so a blind re-POST risks a double-fill. We accept the
+    /// safe failure (no order) instead. Recovery: if the order *filled*, live reconciliation
+    /// (`reconcile_live`/G4) adopts the position next cycle and the deterministic `client_order_id`
+    /// keeps any future retry idempotent. **Caveat:** a placed-but-still-*resting* order can't be seen
+    /// or cancelled by positions-only reconcile (there is no list-orders endpoint) — tracked as the §6l
+    /// resting-order residual.
     pub fn place_order(
         &self,
         ticker: &str,
@@ -212,7 +229,7 @@ impl KalshiClient {
             payload["no_price"] = serde_json::json!(limit_price_cents);
         }
         tracing::info!(ticker, side, action, count, limit_price_cents, "place_order");
-        self.signed(reqwest::Method::POST, "/portfolio/orders", Some(payload))
+        self.signed(reqwest::Method::POST, "/portfolio/orders", Some(payload), 1) // no retry — see docstring
     }
 }
 

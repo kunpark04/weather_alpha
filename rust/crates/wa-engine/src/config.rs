@@ -37,6 +37,23 @@ pub struct Config {
     /// risk beyond the daily entry count; 1.0 = up to the whole bankroll.
     #[serde(default = "default_exposure_max")]
     pub total_exposure_max_pct: f64,
+    /// G9: liveness heartbeat file the resident loop touches each pass (UTC ts) for an external watchdog.
+    #[serde(default = "default_heartbeat")]
+    pub heartbeat_path: PathBuf,
+    /// G10: append-only JSONL sink for critical alerts (order errors, kill/halt, reconcile, unconfirmed
+    /// fills). An external process can tail it and push (email/SMS/Slack).
+    #[serde(default = "default_alerts")]
+    pub alert_path: PathBuf,
+    /// G11 canary: cap the first `canary_trades` LIVE fills to `canary_max_contracts` each, to exercise
+    /// the real order path at minimal risk before full sizing. 0 = no canary (full size immediately).
+    #[serde(default = "default_canary_trades")]
+    pub canary_trades: u32,
+    #[serde(default = "default_canary_max")]
+    pub canary_max_contracts: i64,
+    /// G12: absolute daily realized-loss stop (USD, account-wide). New entries are blocked once today's
+    /// realized loss exceeds this. 0 = disabled.
+    #[serde(default)]
+    pub daily_max_loss_usd: f64,
     pub algo: AlgoToml,
     pub cities: Vec<CityToml>,
 }
@@ -85,6 +102,18 @@ fn default_live_alloc() -> f64 {
 fn default_exposure_max() -> f64 {
     1.0
 }
+fn default_heartbeat() -> PathBuf {
+    PathBuf::from("data/wa_engine/heartbeat")
+}
+fn default_alerts() -> PathBuf {
+    PathBuf::from("data/wa_engine/alerts.jsonl")
+}
+fn default_canary_trades() -> u32 {
+    3
+}
+fn default_canary_max() -> i64 {
+    1
+}
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
@@ -92,6 +121,12 @@ impl Config {
             .with_context(|| format!("reading config {}", path.display()))?;
         let cfg: Config =
             toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+        // A canary cap of 0/negative would make every live order fill 0 contracts -> live_fills never
+        // advances -> the canary never exits -> the bot can never place a sized live trade. Fail fast.
+        anyhow::ensure!(
+            cfg.canary_max_contracts >= 1,
+            "canary_max_contracts must be >= 1 (to disable the canary set canary_trades = 0, not canary_max_contracts = 0)"
+        );
         Ok(cfg)
     }
 
@@ -122,5 +157,35 @@ impl Config {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toml_with(canary_max: i64) -> String {
+        format!(
+            "bankroll_init = 250.0\nstate_path = \"s\"\nlog_path = \"l\"\ncanary_max_contracts = {canary_max}\n\n\
+             [algo]\nband_lo = 0.93\nband_hi = 0.95\ndaily_cap = 3\nstake_fraction = 0.5\ncap_price = 0.97\n\n\
+             [[cities]]\nname = \"C\"\nseries_high = \"KXHIGHCHI\"\nseries_low = \"\"\ntz = \"America/Chicago\"\n"
+        )
+    }
+
+    fn load_str(s: &str) -> Result<Config> {
+        let p = std::env::temp_dir().join(format!("wa_cfg_test_{}.toml", s.len()));
+        std::fs::write(&p, s).unwrap();
+        let r = Config::load(&p);
+        std::fs::remove_file(&p).ok();
+        r
+    }
+
+    #[test]
+    fn rejects_nonpositive_canary_max_contracts() {
+        assert!(load_str(&toml_with(0)).is_err()); // the brick value
+        assert!(load_str(&toml_with(-1)).is_err());
+        let ok = load_str(&toml_with(1)).expect("canary_max_contracts=1 loads");
+        assert_eq!(ok.canary_max_contracts, 1);
+        assert_eq!(ok.canary_trades, 3); // default applied
     }
 }

@@ -16,6 +16,11 @@ live_alloc_frac      = 1.0         # LIVE only: fraction of the REAL Kalshi bala
                                    # whole account. Paper/dry-run ignore it (use bankroll_init).
 total_exposure_max_pct = 1.0       # cap on total OPEN cost as a fraction of the bankroll (account-wide
                                    # live / per-market paper). Backstop beyond daily_cap; tighten to taste.
+heartbeat_path       = "data/wa_engine/heartbeat"      # G9: touched each loop for an external watchdog
+alert_path           = "data/wa_engine/alerts.jsonl"   # G10: critical-alert sink (tail + push externally)
+canary_trades        = 3           # G11: cap the first N LIVE fills to canary_max_contracts each (0=off)
+canary_max_contracts = 1           # G11: contracts per canary fill
+daily_max_loss_usd   = 0.0         # G12: account-wide daily realized-loss stop (USD); 0 = disabled
 
 [algo]
 band_lo        = 0.93

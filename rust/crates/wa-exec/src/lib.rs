@@ -56,20 +56,23 @@ pub enum Execution {
     /// A position to book. For paper/dry-run `contracts`/`fill_vwap` are the *predicted* achievable
     /// fill (the depth walk); for live they are the **confirmed** exchange fill.
     Filled { order_id: Option<String>, contracts: f64, fill_vwap: Option<f64> },
-    /// Nothing to book — nothing was fillable, or a live order didn't cross and was cancelled.
-    NoFill,
+    /// Nothing to book. `reason` ∈ {`nothing_fillable`, `bad_limit`, `no_cross`, `unconfirmed`} — the
+    /// caller logs it and alerts on `unconfirmed` (a placed order whose fill we couldn't verify).
+    NoFill { reason: &'static str },
 }
 
 /// Route one decided entry to the active mode. Paper/dry-run book the predicted achievable fill (no
 /// order). Live places a limit-at-ask taker for the fillable size (a limit-at-ask taker, per CLAUDE.md
 /// lesson #13 — no maker leg), then **confirms the actual fill** from `/portfolio/positions` rather
 /// than assuming the full size filled at our limit; a resting/partial order books only what truly
-/// filled and the remainder is cancelled (port of `execution.py` C1/W3).
+/// filled and the remainder is cancelled (port of `execution.py` C1/W3). `max_contracts` caps the live
+/// order size (the G11 canary uses 1; `i64::MAX` = uncapped); paper/dry-run ignore it (full size).
 pub fn execute(
     mode: Mode,
     client: &KalshiClient,
     entry: &Entry,
     client_order_id: &str,
+    max_contracts: i64,
 ) -> Result<Execution> {
     match mode {
         Mode::DryRun | Mode::Paper => Ok(Execution::Filled {
@@ -77,20 +80,25 @@ pub fn execute(
             contracts: entry.feasibility.fillable_contracts,
             fill_vwap: entry.feasibility.fill_vwap,
         }),
-        Mode::Live => place_and_confirm(client, entry, client_order_id),
+        Mode::Live => place_and_confirm(client, entry, client_order_id, max_contracts),
     }
 }
 
-fn place_and_confirm(client: &KalshiClient, entry: &Entry, coid: &str) -> Result<Execution> {
-    let count = entry.feasibility.fillable_contracts.floor() as i64;
+fn place_and_confirm(
+    client: &KalshiClient,
+    entry: &Entry,
+    coid: &str,
+    max_contracts: i64,
+) -> Result<Execution> {
+    let count = (entry.feasibility.fillable_contracts.floor() as i64).min(max_contracts);
     if count <= 0 {
         tracing::warn!(ticker = %entry.ticker, "live: nothing fillable at/under cap — no order");
-        return Ok(Execution::NoFill);
+        return Ok(Execution::NoFill { reason: "nothing_fillable" });
     }
     // Fat-finger guard: a garbage limit (≤0 or ≥1) must never become a real order.
     if !(entry.limit_price > 0.0 && entry.limit_price < 1.0) {
         tracing::error!(ticker = %entry.ticker, limit = entry.limit_price, "live: limit_price outside (0,1) — refusing order");
-        return Ok(Execution::NoFill);
+        return Ok(Execution::NoFill { reason: "bad_limit" });
     }
     // Limit = the feasibility cap (price we sized fills up to), not the best ask: fills the sized
     // quantity cheapest-first across the ladder and stays marketable through small upticks.
@@ -131,12 +139,12 @@ fn place_and_confirm(client: &KalshiClient, entry: &Entry, coid: &str) -> Result
         // surface it loudly.
         cancel_quietly(client, &order_id);
         tracing::error!(ticker = %entry.ticker, order = ?order_id, "LIVE: fill unconfirmable (positions unreadable) — cancelled best-effort, booked nothing; RECONCILE MANUALLY");
-        return Ok(Execution::NoFill);
+        return Ok(Execution::NoFill { reason: "unconfirmed" });
     }
     if filled <= 0 {
         cancel_quietly(client, &order_id); // retract the resting order so it can't fill after we move on
         tracing::warn!(ticker = %entry.ticker, order = ?order_id, tries = FILL_POLL_TRIES, "LIVE: no fill — cancelled resting order");
-        return Ok(Execution::NoFill);
+        return Ok(Execution::NoFill { reason: "no_cross" });
     }
     if filled < count {
         cancel_quietly(client, &order_id); // partial — retract the remainder so it can't fill after booking
@@ -275,7 +283,8 @@ mod tests {
             },
         };
         let want = Execution::Filled { order_id: None, contracts: 40.0, fill_vwap: Some(0.95) };
-        assert_eq!(execute(Mode::Paper, &client, &entry, "wa-T-FAV-2026-06-16").unwrap(), want);
-        assert_eq!(execute(Mode::DryRun, &client, &entry, "wa-T-FAV-2026-06-16").unwrap(), want);
+        // paper/dry-run ignore max_contracts (canary is live-only) and book the predicted fill.
+        assert_eq!(execute(Mode::Paper, &client, &entry, "wa-T-FAV-2026-06-16", 1).unwrap(), want);
+        assert_eq!(execute(Mode::DryRun, &client, &entry, "wa-T-FAV-2026-06-16", i64::MAX).unwrap(), want);
     }
 }

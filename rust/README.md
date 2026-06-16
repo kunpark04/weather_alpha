@@ -29,7 +29,7 @@ This is the same rule the Python paper bot now uses, so paper ≈ live.
 | `wa-exec` | paper/live execution routing + kill switch + settlement P&L |
 | `wa-engine` | the resident daemon binary that wires it together |
 
-Pure crates carry unit tests asserting parity with the Python reference (`cargo test` → 40 tests).
+Pure crates carry unit tests asserting parity with the Python reference (`cargo test` → 42 tests).
 The Kalshi market data path is keyless (public); only `/portfolio/*` + orders are signed.
 
 ## Run
@@ -56,3 +56,9 @@ fully-static **musl** binary needs `sudo apt install musl-tools` once, then `TAR
 **Arming live is a deliberate, separate step** (the unit ships disabled + `--paper`):
 install `deploy/wa-engine.service`, edit `--paper` → `--live`, ensure `secrets/kalshi-rw.env`, then
 `systemctl --user enable --now wa-engine`. Do this only after the Python paper shadow validates the edge.
+On first arm the **canary** (`canary_trades`, default 3) caps the first few live fills to
+`canary_max_contracts` (default 1) before full sizing.
+
+**Runtime files** under `data/wa_engine/` — `state.json` (atomic), `log.jsonl`, `alert_path`
+(`alerts.jsonl`, critical alerts to tail+push), `heartbeat_path` (liveness for a watchdog). The JSONL
+logs/alerts are **unbounded append-only** — prune/rotate externally like the droplet's other logs.

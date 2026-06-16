@@ -408,6 +408,10 @@ entries/market/event-date, first-come as tz anchors fire east→west, **no cross
   Linux binary in WSL (`powershell -File deploy/build-engine.ps1` → `rust/dist/wa-engine`), `scp` it to
   `weather-alpha@HOST:weather-alpha/bin/`, install `deploy/wa-engine.service` (ships `--paper`, disabled).
   **Arm later:** edit `--paper`→`--live`, ensure `secrets/kalshi-rw.env`, `systemctl --user enable --now wa-engine`.
+  ⚠️ **Before arming, fix the orderbook parse** — `rust/crates/wa-kalshi/src/parse.rs` reads the stale
+  `orderbook`/cents key, not the live `orderbook_fp`/`*_dollars`, so the armed engine sees an **empty depth
+  book** (best-ask fallback only). The same bug was fixed in `scripts/directional_paper.py` 2026-06-16; the
+  Rust parity tests pass against a stale fixture. See HANDOFF §7 `RUST-OB` / `tasks/lessons.md` L23.
 - **PAPER = Python** (`scripts/directional_paper.py`, **no orders**) — **rebuilt to follow live behavior**:
   fires **per (timezone, market) at each city's local anchor** and fetches the **LIVE Kalshi book at that
   moment** (not the logged tape); logs LIVE `yes_ask` + depth ladder + intended-vs-fillable + VWAP/slippage;

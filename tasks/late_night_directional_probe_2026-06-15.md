@@ -462,7 +462,7 @@ a paper shadow that share one **executable rule** (no cross-city look-ahead): fa
 each entry = `stake_fraction/cap` = **16.67%** slot; P&L at the achievable fill, net of fee.
 
 - **LIVE = Rust** (`rust/`, see `rust/README.md`): a modular cargo workspace (`wa-fees/book/algo/
-  kalshi/schedule/state/exec/engine`), 31 parity tests vs the Python, clippy-clean, live-smoke-tested
+  kalshi/schedule/state/exec/engine`), 32 parity tests vs the Python, clippy-clean, live-smoke-tested
   (keyless fetch → favorite → band → feasibility → log). Resident daemon wakes at each city's local
   anchor, fetches the live book, decides, and is real-order-capable (RSA-PSS auth, limit-at-ask taker)
   but **ships built + UNARMED** (`deploy/wa-engine.service`, `deploy/build-engine.{sh,ps1}`). Built as
@@ -503,6 +503,37 @@ PnL is **counterfactual** — the −50%/−51% max-DD comes from single nights 
 and the narrow band excludes exactly those nights. The band is the risk-adjusted sweet spot, not too narrow.
 The higher-leverage fix is **sizing** (cap per-leg exposure / deploy the full 50% only when ≥2 cities
 qualify), not the gate. See `tasks/lessons.md` L22.
+
+## 6k. First-night captures + orderbook-parse fix (2026-06-16)
+
+First real captures landed (event-date 2026-06-15). **Infra healthy:** all 11 `weather-alpha-paper-cap@*`
+timers active; all 10 capture runs exited `success 0`; a few non-fatal `429`s on individual `fetch_markets`
+calls (MIA/SATX/PHIL/DC/SFO — those cities skipped that cycle). Picks (both bankrolls start $250):
+
+| market | scanned | entered | result |
+|---|--:|--:|---|
+| HIGH | 18 | 2 | OKC `B83.5` + Vegas `B106.5` — both settled **YES** (+$1.62 each) |
+| LOW | 15 | 3 | Minneapolis `T54` (+$1.62) + Dallas `T71` (+$2.05) settled YES; Boston `T64` pending (≈+$1.20 win / −$41.80 loss) |
+
+Combined realized **+$6.91** so far, Boston pending. The bot books these at its 14:00-UTC settle; entries
+are at-ask / full-size (see the fix below), so this is the optimistic, no-slippage P&L — and the one
+potential −$41.80 Boston loss vs four ~$1–2 wins is the fat-left-tail the 50%/undiversified-night sizing
+creates (§6j, L22).
+
+**BUG found + fixed + deployed — depth-feasibility was silently dead.** Every entered pick logged
+`fillable_pct=0`, `ladder_depth_usd=0`, `fill_vwap=None`: `directional_paper.py:fetch_orderbook` read the
+response key `orderbook`/`yes`/`no` (cents), but the live `/orderbook` endpoint returns the book under
+**`orderbook_fp`** with **`yes_dollars`/`no_dollars`** (already dollars) → `{}` → empty books. Fixed to read
+`orderbook_fp`/`*_dollars` (no ÷100) with a fallback to the legacy cents shape; verified against the live API
+and via the **deployed** module on the droplet (`fillable_pct=1.0`, VWAP, depth all populate). Realized P&L
+was unaffected (settlement fell back to the at-ask price at full intended size), but depth/VWAP/fillable were
+recording nothing — the exact signal this forward-test exists to collect. Known-good reference:
+`scripts/orderbook_logger.py:146` (it parses `orderbook_fp` correctly; the rebuild failed to copy it). **The
+same bug had also reached the Rust LIVE engine** — a follow-up task fixed `rust/crates/wa-kalshi/src/parse.rs`
+(reads `orderbook_fp`/`*_dollars` via a string-or-number coercion, legacy-cents fallback) and rewrote the
+stale fixture; **`cargo test -p wa-kalshi` passes** (parity suite 31→32), the binary was rebuilt, still
+UNARMED. The fix is in the working tree, **uncommitted**. See `tasks/lessons.md` L23, HANDOFF §7 (`RUST-OB`),
+and the memory `kalshi-orderbook-api-shape`.
 
 ## 7. Reproduce
 ```

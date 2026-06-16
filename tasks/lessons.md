@@ -5,6 +5,36 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L23 — Re-implementing an existing data path: copy the known-good reader's EXACT field access; a silent all-zero/empty parse is a bug, and green unit tests can encode a stale API shape
+
+**Context.** Checking the directional PAPER bot (2026-06-16), every entered pick logged `fillable_pct=0`,
+`ladder_depth_usd=0`, `fill_vwap=None` — the depth-feasibility layer (the whole point of the 2026-06-15
+rebuild) recorded nothing. Root cause: `directional_paper.py:fetch_orderbook` read the response key
+`orderbook` with `yes`/`no` in cents, but the live Kalshi `/orderbook` endpoint returns the book under
+**`orderbook_fp`** with **`yes_dollars`/`no_dollars`** (already dollars) → it got `{}` → empty books →
+feasibility fell through to a zero ladder. The known-good `orderbook_logger.py:146` reads the right key
+(it had run correctly for weeks); the rebuild simply didn't copy it. **The same bug had also reached the Rust
+LIVE engine** (`rust/crates/wa-kalshi/src/parse.rs`), whose 31 "parity" tests passed *falsely* because they
+fed the **stale** `{"orderbook":{"yes":[[40,100]]}}` shape — green on a shape the API no longer sent (a
+follow-up has since fixed it + rewritten the fixture; `cargo test -p wa-kalshi` passes).
+
+**Rule.** When re-implementing an existing data path (parser, API reader) in a new script or language,
+**copy the proven reader's exact field access** instead of re-deriving the response shape from memory —
+point at the file:line that already works (here `orderbook_logger.py`). Then **verify the new parser against
+the LIVE source**, not only unit tests: a fixture can encode an API shape that has since changed, so a
+passing suite is necessary, not sufficient (echoes [[L5]]). Treat a parser that returns **uniformly empty /
+all-zero output** as a bug signal and trace it — never accept it as "thin data" (sibling of [[L18]]: a
+structurally-degenerate value is a tell). When two implementations share a contract, fixing one means
+**auditing the sibling** for the same defect (echoes [[L16]]).
+
+**Why it matters.** The bug degraded **silently** — no exception, no error log, just zeros — so it would
+have quietly wasted every night's depth-feasibility data (the exact signal the rebuild exists to capture)
+until someone read the rows. Worse, the Rust copy is **real-order-capable**: armed, it would size and decide
+every entry against an empty book (best-ask fallback only) while its green parity tests implied correctness.
+A parser verified only against its own stale fixtures is a latent outage with a passing test suite.
+
+---
+
 ## L22 — To widen an entry gate, prove the MARGINAL entries are day-clustered-significant +EV AND model the risk-halt; per-entry CIs + halt-free backtests both flatter a riskier variant
 
 **Context.** Asked whether the directional bot's favorite-mid gate `[0.93,0.95]` was too narrow vs

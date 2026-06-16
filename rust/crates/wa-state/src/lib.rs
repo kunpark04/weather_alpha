@@ -105,6 +105,19 @@ impl Book {
         self.counter.count += 1;
     }
 
+    /// Total cost (capital at risk) of this market's open, unsettled positions — `contracts × VWAP`,
+    /// falling back to `stake_usd` when no fill price is recorded. Feeds the aggregate exposure cap.
+    pub fn open_exposure_usd(&self) -> f64 {
+        self.open
+            .iter()
+            .filter(|p| !p.settled)
+            .map(|p| match p.fill_vwap {
+                Some(v) if v > 0.0 => p.fillable_contracts * v,
+                _ => p.stake_usd,
+            })
+            .sum()
+    }
+
     pub fn account_halted(&self) -> bool {
         self.halted_account
     }
@@ -273,6 +286,15 @@ mod tests {
         assert!(s.is_tracked("T-X")); // tracked in high
         s.low.open.push(open_pos("T-Y", true));
         assert!(!s.is_tracked("T-Y")); // settled -> not tracked
+    }
+
+    #[test]
+    fn open_exposure_sums_unsettled_cost() {
+        let mut b = Book::new(250.0);
+        assert_eq!(b.open_exposure_usd(), 0.0);
+        b.open.push(open_pos("T-A", false)); // 40 × 0.95 = 38.0
+        b.open.push(open_pos("T-B", true)); // settled -> excluded
+        assert!((b.open_exposure_usd() - 38.0).abs() < 1e-9);
     }
 
     #[test]

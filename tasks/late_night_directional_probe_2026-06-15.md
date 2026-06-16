@@ -462,7 +462,7 @@ a paper shadow that share one **executable rule** (no cross-city look-ahead): fa
 each entry = `stake_fraction/cap` = **16.67%** slot; P&L at the achievable fill, net of fee.
 
 - **LIVE = Rust** (`rust/`, see `rust/README.md`): a modular cargo workspace (`wa-fees/book/algo/
-  kalshi/schedule/state/exec/engine`), 39 parity tests vs the Python, clippy-clean, live-smoke-tested
+  kalshi/schedule/state/exec/engine`), 40 parity tests vs the Python, clippy-clean, live-smoke-tested
   (keyless fetch → favorite → band → feasibility → log). Resident daemon wakes at each city's local
   anchor, fetches the live book, decides, and is real-order-capable (RSA-PSS auth, limit-at-ask taker)
   but **ships built + UNARMED** (`deploy/wa-engine.service`, `deploy/build-engine.{sh,ps1}`). Built as
@@ -571,9 +571,9 @@ disabled). This is the safety/confirmation audit gating the `--paper`→`--live`
 | ✅ DONE | G2 | **Bankroll not synced to the real account** — sized off `cfg.bankroll_init`, balance only *logged*. Lesson #11; regression from `L3`. Wrinkle: `high`+`low` are independent Books but share one real account. | **Fix-A ✓ 2026-06-16** |
 | ✅ DONE | G3 | **Crash between place and save** — real order untracked; orphaned if restart is past the window. coid stops a *double*, not a *lost*, order. | **✓ 2026-06-16** write-ahead `pending` journal |
 | ✅ DONE | G4 | **No reconciliation** — `positions_raw()` existed but was never called. Regression from `RECON`. | **✓ 2026-06-16** `reconcile_live` adopts exchange orphans; drift-alert still deferred |
-| 🟠 REC | G5 | **No aggregate exposure cap** — only the daily-3 count bounds risk (Python had `total_exposure_max_pct`). | `total_exposure_max_usd` gate |
-| 🟠 REC | G6 | **No per-order sanity bound** — bad `yes_ask` (0 / 1.0) flows into `limit_cents`; no max-count/$. | Assert `yes_ask∈(0,1)`, `limit∈[1,99]`, count/$ ≤ max |
-| 🟠 REC | G7 | **Limit not guaranteed marketable** — limit = ask captured pre-fetch; any uptick ⇒ no cross. | Re-fetch top-of-book pre-POST or +buffer ≤cap |
+| ✅ DONE | G5 | **No aggregate exposure cap** — only the daily-3 count bounded risk (Python had `total_exposure_max_pct`). | **✓ 2026-06-16** `total_exposure_max_pct` gate (account-wide live / per-market paper) |
+| ✅ DONE | G6 | **No per-order sanity bound** — bad limit could flow into `limit_cents`. | **✓ 2026-06-16** refuse `limit_price ∉ (0,1)` (with Fix-B) |
+| ✅ DONE | G7 | **Limit not guaranteed marketable** — limit = best ask; any uptick ⇒ no cross, and it under-filled vs the cap-walk size. | **✓ 2026-06-16** limit = `cap_price` (aligns with feasibility; marketable through upticks) |
 | 🟡 NICE | G8 | **POST retries on 5xx/timeout** (`wa-kalshi:146`) — double-fill safety rests entirely on Kalshi honoring coid. | Confirm idempotency contract; reconcile on ambiguous fail |
 | 🟡 NICE | G9 | No liveness heartbeat (dead daemon undetectable between anchors). | Health-file touch + watchdog |
 | 🟡 NICE | G10 | No push alerting (order_error/kill/halt/divergence are log-only). | Wire a notifier |
@@ -623,8 +623,23 @@ rather than halts**. **Still deferred:** count-correction / phantom-removal and 
 `parse_ticker`; journal in `process_anchor`; call before `settle_open` in both loops). Tests +5 →
 **suite 39**.
 
-**Arming order:** ~~G1/G2~~ ✅ → ~~G3/G4~~ ✅ → **G5 (aggregate exposure cap) / G7 (marketable limit)**
-next (cheap) → G8–G12 (ops polish) → **canary fill (G11)** → flip `--live`.
+### Fix-E/F — exposure cap (G5) + marketable limit (G7) ✅ Implemented 2026-06-16
+**G5 aggregate exposure cap:** new config `total_exposure_max_pct` (default 1.0; tighten at deploy) —
+`process_anchor` refuses an entry when `open_cost + stake > total_exposure_max_pct × bankroll`, where
+open cost = Σ `contracts × VWAP` of unsettled positions (`Book::open_exposure_usd`), summed
+**account-wide in live** (one real account, vs `live_bankroll`) and **per-market in paper**. A backstop
+on capital-at-risk beyond the daily entry count; logs an `exposure_cap` skip. **G7 marketable limit:**
+the order limit is now `cap_price` (carried on `Entry.limit_price`), not the best ask. The feasibility
+walk already sizes fills up to `cap_price` and the paper bot books at that cap-walk VWAP, but the old
+best-ask limit only crossed the top level — so it missed on any uptick *and* systematically under-filled
+vs the size. Limit = cap fills the sized quantity cheapest-first (realized VWAP ≤ cap, confirmed by
+Fix-B) and keeps live ≈ paper. Also closes **G6** (refuse `limit_price ∉ (0,1)`). **Touched:** `wa-algo`
+(`Entry.limit_price`), `wa-exec` (limit + guard), `wa-state` (`open_exposure_usd`), `config`/`wa.toml`
+(+`total_exposure_max_pct`), `main.rs` (cap gate). Tests +1 → **suite 40**.
+
+**Arming order:** ~~G1/G2~~ ✅ → ~~G3/G4~~ ✅ → ~~G5/G6/G7~~ ✅ → **G8–G12 (ops polish: heartbeat,
+alerting, canary, daily-loss stop)** → **canary fill (G11)** → flip `--live`. The core safety/correctness
+gaps are now closed; what remains is ops hardening + the deliberate first-fill canary.
 
 ## 7. Reproduce
 ```
@@ -643,7 +658,7 @@ python scripts/lowtemp_2city_algo.py --tau 0.93               # §6f 2-uncorrela
 python scripts/lowtemp_anchor_sweep.py --rebuild              # §6f low-temp anchor sweep (-> 22:00)
 python scripts/directional_preset.py --preset hightemp17      # §6f LOCKED preset: high-temp @17:00
 python scripts/directional_preset.py --preset lowtemp22       # §6f LOCKED preset: low-temp @22:00
-cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (39)
+cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (40)
 cargo run --manifest-path rust/Cargo.toml -p wa-engine -- --once --dry-run   # §6i live smoke (no orders)
 powershell -File deploy/build-engine.ps1                       # §6i build the Rust Linux binary (WSL)
 ```

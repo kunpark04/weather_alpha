@@ -87,12 +87,14 @@ fn place_and_confirm(client: &KalshiClient, entry: &Entry, coid: &str) -> Result
         tracing::warn!(ticker = %entry.ticker, "live: nothing fillable at/under cap — no order");
         return Ok(Execution::NoFill);
     }
-    // Fat-finger guard: a garbage ask (≤0 or ≥1) must never become a real limit order.
-    if !(entry.yes_ask > 0.0 && entry.yes_ask < 1.0) {
-        tracing::error!(ticker = %entry.ticker, yes_ask = entry.yes_ask, "live: yes_ask outside (0,1) — refusing order");
+    // Fat-finger guard: a garbage limit (≤0 or ≥1) must never become a real order.
+    if !(entry.limit_price > 0.0 && entry.limit_price < 1.0) {
+        tracing::error!(ticker = %entry.ticker, limit = entry.limit_price, "live: limit_price outside (0,1) — refusing order");
         return Ok(Execution::NoFill);
     }
-    let limit_cents = (entry.yes_ask * 100.0).round() as i64;
+    // Limit = the feasibility cap (price we sized fills up to), not the best ask: fills the sized
+    // quantity cheapest-first across the ladder and stays marketable through small upticks.
+    let limit_cents = (entry.limit_price * 100.0).round() as i64;
     // Pre-order holding (the engine is normally flat on a fresh event-date ticker, but confirm via
     // before/after deltas like the Python path so topping up an existing holding can't double-count).
     let (before_qty, before_avg, _) = held(client, &entry.ticker);
@@ -263,6 +265,7 @@ mod tests {
             subtitle: String::new(),
             mid: 0.94,
             yes_ask: 0.95,
+            limit_price: 0.97,
             stake_usd: 41.67,
             want_contracts: 43.86,
             feasibility: wa_book::Feasibility {

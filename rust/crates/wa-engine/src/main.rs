@@ -400,6 +400,25 @@ fn process_anchor(
                 wa_algo::Decision::Enter(e) => e,
                 _ => return,
             };
+            // G5: aggregate exposure cap — bound total open cost beyond the daily entry count.
+            // Account-wide in live (one real account); per-market in paper (independent bankrolls).
+            let open_exposure = match mode {
+                Mode::Live => state.high.open_exposure_usd() + state.low.open_exposure_usd(),
+                _ if market == "high" => state.high.open_exposure_usd(),
+                _ => state.low.open_exposure_usd(),
+            };
+            if open_exposure + entry.stake_usd > cfg.total_exposure_max_pct * bankroll {
+                tracing::warn!(
+                    market,
+                    city = %a.city_name,
+                    open = format!("{:.2}", open_exposure),
+                    add = format!("{:.2}", entry.stake_usd),
+                    cap = format!("{:.2}", cfg.total_exposure_max_pct * bankroll),
+                    "exposure cap — skip"
+                );
+                log_event(&cfg.log_path, skip_row(a, &event_ticker, "exposure_cap", Some(entry.mid), quotes.len()));
+                return;
+            }
             if mode == Mode::Live && wa_exec::kill_switch_active(&cfg.kill_switch_path) {
                 tracing::warn!("KILL_SWITCH active — not placing live order for {}", entry.ticker);
                 log_event(&cfg.log_path, skip_row(a, &event_ticker, "kill_switch", Some(entry.mid), quotes.len()));

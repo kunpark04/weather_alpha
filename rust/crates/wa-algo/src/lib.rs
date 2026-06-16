@@ -67,6 +67,12 @@ pub struct Entry {
     pub subtitle: String,
     pub mid: f64,
     pub yes_ask: f64,
+    /// Taker limit price for the order = `cfg.cap_price` — the price up to which `feasibility` counted
+    /// fillable depth. Placing at this (not the best ask) fills the sized quantity cheapest-first
+    /// across the ladder and stays marketable through small upticks; the realized VWAP (≤ this) is
+    /// confirmed from the exchange post-fill. Keeps live execution consistent with the cap-walk sizing
+    /// (and the paper shadow, which books at the cap-walk VWAP).
+    pub limit_price: f64,
     pub stake_usd: f64,
     pub want_contracts: f64,
     pub feasibility: Feasibility,
@@ -129,6 +135,7 @@ pub fn decide(
         subtitle: fav.subtitle.clone(),
         mid,
         yes_ask,
+        limit_price: cfg.cap_price,
         stake_usd,
         want_contracts,
         feasibility: feas,
@@ -171,6 +178,7 @@ mod tests {
                 // one of 3 slots of 50% => 16.667% of 250 = 41.667
                 assert!((e.stake_usd - (0.50 / 3.0) * 250.0).abs() < 1e-9);
                 assert!((e.want_contracts - e.stake_usd / 0.95).abs() < 1e-9);
+                assert!((e.limit_price - cfg.cap_price).abs() < 1e-12); // limit = cap, not best ask
             }
             _ => panic!("expected Enter, got {d:?}"),
         }

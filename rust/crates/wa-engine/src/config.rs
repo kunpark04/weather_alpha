@@ -32,6 +32,11 @@ pub struct Config {
     /// Paper/dry-run ignore it (they use the per-market `bankroll_init`).
     #[serde(default = "default_live_alloc")]
     pub live_alloc_frac: f64,
+    /// Aggregate exposure cap: refuse a new entry if total open cost would exceed this fraction of
+    /// the sizing bankroll (account-wide in live / per-market in paper). A backstop on capital at
+    /// risk beyond the daily entry count; 1.0 = up to the whole bankroll.
+    #[serde(default = "default_exposure_max")]
+    pub total_exposure_max_pct: f64,
     pub algo: AlgoToml,
     pub cities: Vec<CityToml>,
 }
@@ -75,6 +80,9 @@ fn default_poll() -> u64 {
     300
 }
 fn default_live_alloc() -> f64 {
+    1.0
+}
+fn default_exposure_max() -> f64 {
     1.0
 }
 

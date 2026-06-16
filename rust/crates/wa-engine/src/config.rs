@@ -54,6 +54,10 @@ pub struct Config {
     /// realized loss exceeds this. 0 = disabled.
     #[serde(default)]
     pub daily_max_loss_usd: f64,
+    /// G10: alert if the real balance drifts from the engine's cash ledger by more than this (USD) at a
+    /// resync — catches an unbooked fill / fee surprise / external account activity. 0 = disabled.
+    #[serde(default = "default_drift_alert")]
+    pub balance_drift_alert_usd: f64,
     pub algo: AlgoToml,
     pub cities: Vec<CityToml>,
 }
@@ -113,6 +117,9 @@ fn default_canary_trades() -> u32 {
 }
 fn default_canary_max() -> i64 {
     1
+}
+fn default_drift_alert() -> f64 {
+    1.0
 }
 
 impl Config {

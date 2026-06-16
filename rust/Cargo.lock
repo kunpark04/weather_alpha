@@ -1539,6 +1539,7 @@ dependencies = [
  "wa-algo",
  "wa-book",
  "wa-exec",
+ "wa-fees",
  "wa-kalshi",
  "wa-schedule",
  "wa-state",

@@ -182,6 +182,13 @@ pub struct EngineState {
     pub daily_pnl_date: Option<NaiveDate>,
     #[serde(default)]
     pub daily_pnl_usd: f64,
+    /// Drift ledger (G10 balance-drift alert): the engine's running expectation of the real account
+    /// balance — anchored to truth at activation + after each resync, debited by each live entry's
+    /// cost and credited by each settlement payout in between. A mismatch vs the real balance at the
+    /// next resync flags an unexplained move (unbooked fill, fee surprise, external activity).
+    /// Live-only; `None` otherwise.
+    #[serde(default)]
+    pub expected_balance: Option<f64>,
 }
 
 impl EngineState {
@@ -196,6 +203,7 @@ impl EngineState {
             live_fills: 0,
             daily_pnl_date: None,
             daily_pnl_usd: 0.0,
+            expected_balance: None,
         }
     }
 

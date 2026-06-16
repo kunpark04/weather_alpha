@@ -12,7 +12,7 @@ mod auth;
 mod parse;
 
 pub use auth::Signer;
-pub use parse::PositionHeld;
+pub use parse::{PositionHeld, RestingOrder};
 pub use wa_book::{Level, OrderBook, Quote};
 
 use anyhow::{anyhow, Result};
@@ -182,6 +182,14 @@ impl KalshiClient {
     pub fn positions(&self) -> Result<Vec<PositionHeld>> {
         let data = self.signed(reqwest::Method::GET, "/portfolio/positions", None, SIGNED_RETRIES)?;
         Ok(parse::positions_from_value(&data))
+    }
+
+    /// Resting (open, unfilled) orders (`GET /portfolio/orders`, filtered to `status == "resting"`).
+    /// Reconcile cancels our orphan resting orders — the engine is a taker and never intends to leave
+    /// one resting, so any that exist are leftovers from an ambiguous/non-crossing placement.
+    pub fn resting_orders(&self) -> Result<Vec<RestingOrder>> {
+        let data = self.signed(reqwest::Method::GET, "/portfolio/orders", None, SIGNED_RETRIES)?;
+        Ok(parse::resting_orders_from_value(&data))
     }
 
     /// Cancel a resting order (`DELETE /portfolio/orders/{id}`). Used to retract the unfilled

@@ -21,6 +21,7 @@ alert_path           = "data/wa_engine/alerts.jsonl"   # G10: critical-alert sin
 canary_trades        = 3           # G11: cap the first N LIVE fills to canary_max_contracts each (0=off)
 canary_max_contracts = 1           # G11: contracts per canary fill
 daily_max_loss_usd   = 0.0         # G12: account-wide daily realized-loss stop (USD); 0 = disabled
+balance_drift_alert_usd = 1.0      # G10: alert if real balance vs the cash ledger drifts > this (USD); 0=off
 
 [algo]
 band_lo        = 0.93

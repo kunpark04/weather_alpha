@@ -462,7 +462,7 @@ a paper shadow that share one **executable rule** (no cross-city look-ahead): fa
 each entry = `stake_fraction/cap` = **16.67%** slot; P&L at the achievable fill, net of fee.
 
 - **LIVE = Rust** (`rust/`, see `rust/README.md`): a modular cargo workspace (`wa-fees/book/algo/
-  kalshi/schedule/state/exec/engine`), 42 parity tests vs the Python, clippy-clean, live-smoke-tested
+  kalshi/schedule/state/exec/engine`), 43 parity tests vs the Python, clippy-clean, live-smoke-tested
   (keyless fetch → favorite → band → feasibility → log). Resident daemon wakes at each city's local
   anchor, fetches the live book, decides, and is real-order-capable (RSA-PSS auth, limit-at-ask taker)
   but **ships built + UNARMED** (`deploy/wa-engine.service`, `deploy/build-engine.{sh,ps1}`). Built as
@@ -656,17 +656,26 @@ WARNs: adopted orphans now retire a canary slot; the exposure gate uses the cana
 `event_date` would be wrong — settlements lag the event ~1 day, so the gate would read 0). Tests +2 →
 **suite 42**, clippy-clean, binary rebuilt + UNARMED.
 
-**Two residuals (documented, not silently dropped):**
-- **Resting-order recovery:** positions-only G4 recovers a *filled* order but can't see/cancel a
-  placed-but-still-*resting* one (no list-orders endpoint). Narrow — limit=`cap_price` is marketable and the
-  canary caps early orders to 1 contract — but real for a post-canary full-size order on a network-loss-after-accept.
-  Durable fix needs `GET /portfolio/orders` + cancel-by-coid.
-- **Booked-vs-balance drift alert:** still deferred (needs a per-cycle entry-cost + settlement ledger to
-  avoid false alarms).
+### Fix-H — residuals closed (2026-06-16)
+The two documented residuals are now **fixed** (tests +1 → **suite 43**, clippy-clean, binary rebuilt):
+- **Resting-order recovery ✅** — added `KalshiClient::resting_orders()` (`GET /portfolio/orders`,
+  keeps `status==resting`) + a `RestingOrder` parser; `reconcile_live` now cancels any `wa-`-prefixed
+  resting order each live cycle. The engine is a pure taker (limit=`cap_price`), so a resting order is
+  always an orphan from an ambiguous/non-crossing place — this closes the placed-but-resting hole that
+  positions-only adoption couldn't see or cancel.
+- **Booked-vs-balance drift alert ✅** — `EngineState.expected_balance` is a cash ledger anchored to the
+  real balance at activation + after each resync, **debited** by each live entry's cost
+  (`contracts·VWAP + fee`, via `wa-fees`) and **credited** by each settlement payout (`win ? contracts :
+  0`). `sync_live_bankroll` alerts (`balance_drift`) when the real balance diverges from the ledger by
+  more than `balance_drift_alert_usd` (default $1), then re-anchors to truth (per-interval, no
+  cumulative false alarms). Catches an unbooked fill / fee surprise / external account activity. The
+  per-cycle re-anchor + exact fee accounting are what make it non-false-alarming.
 
-**Arming order:** ~~G1–G7~~ ✅ → ~~G8–G12~~ ✅ → **canary fill (G11, automatic on first arm)** → flip
-`--live`. All safety/correctness + ops gaps are closed; the two residuals above are the only known
-follow-ups, neither a blocker for a canary-gated arm.
+**Arming order:** ~~G1–G7~~ ✅ → ~~G8–G12~~ ✅ → ~~residuals~~ ✅ → **canary fill (G11, automatic on
+first arm)** → flip `--live`. **Every §6l gap and residual is closed.** The live order path is now fully
+tracked end-to-end (place → confirm fill → adopt orphans → cancel resting), real-balance-sized, and
+drift-monitored. Engine ships UNARMED; the deliberate `--paper`→`--live` flip + the Python paper shadow
+remain the gates.
 
 ## 7. Reproduce
 ```
@@ -685,7 +694,7 @@ python scripts/lowtemp_2city_algo.py --tau 0.93               # §6f 2-uncorrela
 python scripts/lowtemp_anchor_sweep.py --rebuild              # §6f low-temp anchor sweep (-> 22:00)
 python scripts/directional_preset.py --preset hightemp17      # §6f LOCKED preset: high-temp @17:00
 python scripts/directional_preset.py --preset lowtemp22       # §6f LOCKED preset: low-temp @22:00
-cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (42)
+cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (43)
 cargo run --manifest-path rust/Cargo.toml -p wa-engine -- --once --dry-run   # §6i live smoke (no orders)
 powershell -File deploy/build-engine.ps1                       # §6i build the Rust Linux binary (WSL)
 ```

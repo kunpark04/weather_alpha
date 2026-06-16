@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 wa-book = { path = "../wa-book" }
 wa-algo = { path = "../wa-algo" }
+wa-fees = { path = "../wa-fees" }
 wa-schedule = { path = "../wa-schedule" }
 wa-state = { path = "../wa-state" }
 wa-kalshi = { path = "../wa-kalshi" }

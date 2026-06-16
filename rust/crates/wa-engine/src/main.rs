@@ -70,6 +70,7 @@ fn main() -> Result<()> {
             .balance_cents()
             .context("LIVE requires a /portfolio/balance read at activation (lesson #11)")?;
         adopt_live_bankroll(&cfg, &mut state, bal);
+        state.expected_balance = Some(bal as f64 / 100.0); // anchor the G10 drift ledger to truth
     }
 
     tracing::info!(
@@ -126,7 +127,21 @@ fn sync_live_bankroll(cfg: &Config, mode: Mode, client: &KalshiClient, state: &m
         return;
     }
     match client.balance_cents() {
-        Ok(c) => adopt_live_bankroll(cfg, state, c),
+        Ok(c) => {
+            let bal = c as f64 / 100.0;
+            // G10 drift alert: compare the real balance to the engine's cash ledger, then re-anchor the
+            // ledger to truth (so drift is reported per-interval, not cumulatively).
+            if cfg.balance_drift_alert_usd > 0.0 {
+                if let Some(eb) = state.expected_balance {
+                    let drift = bal - eb;
+                    if drift.abs() > cfg.balance_drift_alert_usd {
+                        alert(cfg, "balance_drift", &format!("real balance ${bal:.2} vs ledger ${eb:.2} (drift {drift:+.2}) — unbooked fill / fee / external activity?"));
+                    }
+                }
+            }
+            state.expected_balance = Some(bal);
+            adopt_live_bankroll(cfg, state, c);
+        }
         Err(e) => {
             tracing::warn!("live balance resync failed (keeping ${:?}): {e}", state.live_bankroll)
         }
@@ -172,6 +187,19 @@ fn reconcile_live(cfg: &Config, mode: Mode, client: &KalshiClient, state: &mut E
         state.live_fills += 1;
     }
     state.pending = None;
+    // Cancel our orphan resting orders: the engine is a taker (limit = cap_price) and never intends to
+    // leave one resting, so any "wa-" resting order is a leftover from an ambiguous/non-crossing place
+    // that positions-only adoption can't see. Best-effort. (Closes the §6l resting-order residual.)
+    match client.resting_orders() {
+        Ok(orders) => {
+            for o in orders.iter().filter(|o| o.client_order_id.starts_with("wa-")) {
+                tracing::warn!(ticker = %o.ticker, order = %o.order_id, "RECON: cancelling orphan resting order");
+                alert(cfg, "reconcile_cancel", &format!("cancelled orphan resting order {} ({})", o.order_id, o.ticker));
+                let _ = client.cancel_order(&o.order_id);
+            }
+        }
+        Err(e) => tracing::warn!("reconcile: resting-orders read failed (skipping): {e}"),
+    }
 }
 
 /// Reconstruct an `OpenPosition` for an untracked exchange holding. When the pending journal's ticker
@@ -529,6 +557,13 @@ fn process_anchor(
                 if in_canary {
                     tracing::info!(market, city = %a.city_name, live_fills = state.live_fills, canary = cfg.canary_trades, "canary fill recorded (capped to {} contract(s))", cfg.canary_max_contracts);
                 }
+                // G10 drift ledger: debit the cash this fill consumed (contracts*VWAP + fee).
+                if let Some(eb) = state.expected_balance {
+                    let fill = fill_vwap.unwrap_or(entry.yes_ask);
+                    let cost = contracts * fill + wa_fees::trade_fee_dollars(fill, contracts.round() as i64);
+                    state.expected_balance = Some(eb - cost);
+                }
+                let _ = state.save(&cfg.state_path); // persist counter + ledger now (parity w/ G3 journal)
             }
             tracing::info!(
                 market,
@@ -550,6 +585,7 @@ fn process_anchor(
 /// per-market bankroll (updating halts), logs a SETTLE row, and drops settled rows from `open`.
 fn settle_open(cfg: &Config, client: &KalshiClient, state: &mut EngineState) {
     let mut booked_total = 0.0_f64; // account-wide realized P&L this pass (feeds the G12 daily stop)
+    let mut payout_total = 0.0_f64; // account-wide settlement cash in this pass (feeds the G10 ledger)
     for market in ["high", "low"] {
         let book = state.book(market);
         if book.open.iter().all(|p| p.settled) {
@@ -582,6 +618,7 @@ fn settle_open(cfg: &Config, client: &KalshiClient, state: &mut EngineState) {
             book.open[i].pnl_usd = Some(pnl);
             book.book_settlement(&city, pnl);
             booked_total += pnl;
+            payout_total += if win { book.open[i].fillable_contracts } else { 0.0 }; // Kalshi pays $1/contract on win
             // G10: alert when a drawdown halt newly latches (operator must `scripts/halt.py --reset`).
             if !was_acct && book.account_halted() {
                 let br = book.bankroll_usd;
@@ -604,6 +641,13 @@ fn settle_open(cfg: &Config, client: &KalshiClient, state: &mut EngineState) {
     // G12: roll today's account-wide realized P&L for the daily-loss stop.
     if booked_total != 0.0 {
         state.record_daily_pnl(Utc::now().date_naive(), booked_total);
+    }
+    // G10 drift ledger: credit settlement payouts (win pays $1/contract; loss pays 0). The real balance
+    // already reflects these once Kalshi settles, so the ledger stays aligned with truth.
+    if payout_total != 0.0 {
+        if let Some(eb) = state.expected_balance {
+            state.expected_balance = Some(eb + payout_total);
+        }
     }
 }
 

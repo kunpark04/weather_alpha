@@ -131,6 +131,33 @@ pub fn positions_from_value(data: &Value) -> Vec<PositionHeld> {
     out
 }
 
+/// A resting (open, unfilled) order from a `/portfolio/orders` response — used by reconcile to cancel
+/// orphan resting orders the engine never intends to leave (it is a taker at `cap_price`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RestingOrder {
+    pub order_id: String,
+    pub ticker: String,
+    pub client_order_id: String,
+}
+
+/// Resting orders from a `/portfolio/orders` response (`{"orders":[{order_id,ticker,status,...}]}`).
+/// Keeps only `status == "resting"` rows that carry an `order_id`; defensive to missing fields.
+pub fn resting_orders_from_value(data: &Value) -> Vec<RestingOrder> {
+    let Some(arr) = data.get("orders").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter(|o| str_field(o, "status") == Some("resting"))
+        .filter_map(|o| {
+            Some(RestingOrder {
+                order_id: str_field(o, "order_id")?.to_string(),
+                ticker: str_field(o, "ticker").unwrap_or("").to_string(),
+                client_order_id: str_field(o, "client_order_id").unwrap_or("").to_string(),
+            })
+        })
+        .collect()
+}
+
 /// The single ticker that settled `yes` for an event, else None (not settled / ambiguous).
 /// Mirrors `directional_paper.settlement_winner`: prefer `settlement_value`, else `result`.
 pub fn settlement_winner(markets: &[Value]) -> Option<String> {
@@ -223,6 +250,19 @@ mod tests {
         assert_eq!(lp[0], PositionHeld { ticker: "T-NO".into(), side: "no".into(), contracts: 3, avg_price_cents: 40 });
         // no market_positions key -> empty
         assert!(positions_from_value(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn resting_orders_filters_status_and_extracts() {
+        let data = json!({"orders":[
+            {"order_id":"o1","ticker":"T-A","client_order_id":"wa-T-A-2026-06-16","status":"resting"},
+            {"order_id":"o2","ticker":"T-B","status":"executed"}, // not resting -> dropped
+            {"ticker":"T-C","status":"resting"},                  // no order_id -> dropped
+        ]});
+        let r = resting_orders_from_value(&data);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0], RestingOrder { order_id: "o1".into(), ticker: "T-A".into(), client_order_id: "wa-T-A-2026-06-16".into() });
+        assert!(resting_orders_from_value(&json!({})).is_empty());
     }
 
     #[test]

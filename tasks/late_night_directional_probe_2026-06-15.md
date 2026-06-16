@@ -462,7 +462,7 @@ a paper shadow that share one **executable rule** (no cross-city look-ahead): fa
 each entry = `stake_fraction/cap` = **16.67%** slot; P&L at the achievable fill, net of fee.
 
 - **LIVE = Rust** (`rust/`, see `rust/README.md`): a modular cargo workspace (`wa-fees/book/algo/
-  kalshi/schedule/state/exec/engine`), 34 parity tests vs the Python, clippy-clean, live-smoke-tested
+  kalshi/schedule/state/exec/engine`), 39 parity tests vs the Python, clippy-clean, live-smoke-tested
   (keyless fetch → favorite → band → feasibility → log). Resident daemon wakes at each city's local
   anchor, fetches the live book, decides, and is real-order-capable (RSA-PSS auth, limit-at-ask taker)
   but **ships built + UNARMED** (`deploy/wa-engine.service`, `deploy/build-engine.{sh,ps1}`). Built as
@@ -569,8 +569,8 @@ disabled). This is the safety/confirmation audit gating the `--paper`→`--live`
 |---|---|---|---|
 | ✅ DONE | G1 | **No fill confirmation.** OpenPosition recorded *predicted* `fillable_contracts`/`fill_vwap`; a limit-at-ask that doesn't cross rests/partials was booked as a phantom full fill. | **Fix-B ✓ 2026-06-16** |
 | ✅ DONE | G2 | **Bankroll not synced to the real account** — sized off `cfg.bankroll_init`, balance only *logged*. Lesson #11; regression from `L3`. Wrinkle: `high`+`low` are independent Books but share one real account. | **Fix-A ✓ 2026-06-16** |
-| 🟠 REC | G3 | **Crash between place and save** (`main.rs:119-127`) — real order untracked; orphaned if restart is past the window. coid stops a *double*, not a *lost*, order. | Journal intent before POST |
-| 🟠 REC | G4 | **No reconciliation** — `positions_raw()` exists (`wa-kalshi:166`) but is never called. Regression from `RECON`. | Boot+cycle reconcile vs `/portfolio/*`; halt on divergence (+ booked-vs-balance drift, deferred here from Fix-A) |
+| ✅ DONE | G3 | **Crash between place and save** — real order untracked; orphaned if restart is past the window. coid stops a *double*, not a *lost*, order. | **✓ 2026-06-16** write-ahead `pending` journal |
+| ✅ DONE | G4 | **No reconciliation** — `positions_raw()` existed but was never called. Regression from `RECON`. | **✓ 2026-06-16** `reconcile_live` adopts exchange orphans; drift-alert still deferred |
 | 🟠 REC | G5 | **No aggregate exposure cap** — only the daily-3 count bounds risk (Python had `total_exposure_max_pct`). | `total_exposure_max_usd` gate |
 | 🟠 REC | G6 | **No per-order sanity bound** — bad `yes_ask` (0 / 1.0) flows into `limit_cents`; no max-count/$. | Assert `yes_ask∈(0,1)`, `limit∈[1,99]`, count/$ ≤ max |
 | 🟠 REC | G7 | **Limit not guaranteed marketable** — limit = ask captured pre-fetch; any uptick ⇒ no cross. | Re-fetch top-of-book pre-POST or +buffer ≤cap |
@@ -607,9 +607,24 @@ fat-finger guard** (refuse the order if `yes_ask ∉ (0,1)`). **Touched:** `wa-k
 `wa-exec` (execute/confirm+test), `main.rs`. **Tests +2 → suite 34, clippy-clean, binary rebuilt + still
 UNARMED.**
 
-**Arming order:** ~~G1/G2 (BLOCKERs)~~ ✅ done → **G3/G4 next** (journal-before-place + startup
-reconciliation; G4 also absorbs the drift detector) → G5/G7 (cheap) → G8–G12 (ops polish) → canary fill
-(G11) → flip `--live`.
+### Fix-C/D — order journal (G3) + live reconciliation (G4) ✅ Implemented 2026-06-16
+**G3 write-ahead journal:** `EngineState.pending: Option<OpenPosition>` — in live, the intended position
+is persisted (`state.save`) *before* the order is sent; if the journal can't be written the order is
+**not** placed (never trade an unrecoverable order). Cleared after the fill is recorded / on NoFill /
+on error. **G4 reconciliation** (`reconcile_live`, each live cycle incl. boot): pulls
+`client.positions()` and **adopts any untracked YES holding** as an open position so it settles —
+enriching from the `pending` journal when the ticker matches, else reconstructing from the ticker
+(`parse_ticker` → series/market/event/date), with the **exchange fill as truth**. This self-heals two
+orphan paths: the G3 crash-between-place-and-save window, *and* a fill the Fix-B confirm-poll missed
+because `/portfolio/positions` lagged past the poll window. Exchange = truth, so reconcile **adopts
+rather than halts**. **Still deferred:** count-correction / phantom-removal and the booked-vs-balance
+*drift alert* (needs a per-cycle entry-cost + settlement ledger to avoid false alarms). **Touched:**
+`wa-state` (+`pending`, `is_tracked`), `main.rs` (`reconcile_live` / `open_position_from_exchange` /
+`parse_ticker`; journal in `process_anchor`; call before `settle_open` in both loops). Tests +5 →
+**suite 39**.
+
+**Arming order:** ~~G1/G2~~ ✅ → ~~G3/G4~~ ✅ → **G5 (aggregate exposure cap) / G7 (marketable limit)**
+next (cheap) → G8–G12 (ops polish) → **canary fill (G11)** → flip `--live`.
 
 ## 7. Reproduce
 ```
@@ -628,7 +643,7 @@ python scripts/lowtemp_2city_algo.py --tau 0.93               # §6f 2-uncorrela
 python scripts/lowtemp_anchor_sweep.py --rebuild              # §6f low-temp anchor sweep (-> 22:00)
 python scripts/directional_preset.py --preset hightemp17      # §6f LOCKED preset: high-temp @17:00
 python scripts/directional_preset.py --preset lowtemp22       # §6f LOCKED preset: low-temp @22:00
-cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (34)
+cargo test --manifest-path rust/Cargo.toml                    # §6i Rust LIVE engine parity tests (39)
 cargo run --manifest-path rust/Cargo.toml -p wa-engine -- --once --dry-run   # §6i live smoke (no orders)
 powershell -File deploy/build-engine.ps1                       # §6i build the Rust Linux binary (WSL)
 ```

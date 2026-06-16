@@ -153,6 +153,12 @@ pub struct EngineState {
     /// for the orthogonal drawdown halts.)
     #[serde(default)]
     pub live_bankroll: Option<f64>,
+    /// Write-ahead journal of an in-flight LIVE order (G3): the position we're about to place,
+    /// persisted *before* the order is sent so a crash between the place and the post-place save is
+    /// recoverable. Reconciliation (G4) adopts it — with the exchange's true fill — on the next
+    /// cycle/boot. `None` whenever no order is in flight. Live-only.
+    #[serde(default)]
+    pub pending: Option<OpenPosition>,
 }
 
 impl EngineState {
@@ -163,6 +169,7 @@ impl EngineState {
             processed: Vec::new(),
             processed_date: None,
             live_bankroll: None,
+            pending: None,
         }
     }
 
@@ -199,6 +206,12 @@ impl EngineState {
         }
     }
 
+    /// True if an *unsettled* open position for `ticker` exists in either market. Live reconciliation
+    /// uses this to tell a tracked fill from an orphan exchange holding that needs adopting.
+    pub fn is_tracked(&self, ticker: &str) -> bool {
+        self.high.open.iter().chain(self.low.open.iter()).any(|p| p.ticker == ticker && !p.settled)
+    }
+
     /// True if this anchor key was already processed for `date`. Non-mutating: querying a different
     /// date returns false without disturbing the stored set (the date-roll clear lives in
     /// `mark_processed`), so peeking at tomorrow's anchors can't forget today's processed set.
@@ -223,6 +236,54 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    fn open_pos(ticker: &str, settled: bool) -> OpenPosition {
+        OpenPosition {
+            captured_utc: "t".into(),
+            market: "high".into(),
+            city: "Chicago".into(),
+            series: "KXHIGHCHI".into(),
+            event_ticker: "KXHIGHCHI-26JUN16".into(),
+            ticker: ticker.into(),
+            subtitle: String::new(),
+            event_date: "2026-06-16".into(),
+            anchor_utc: String::new(),
+            mid: 0.94,
+            yes_ask: 0.95,
+            stake_usd: 41.0,
+            intended_contracts: 43.0,
+            fillable_contracts: 40.0,
+            fill_vwap: Some(0.95),
+            fillable_pct: 1.0,
+            ladder_depth_usd: 0.0,
+            mode: "live".into(),
+            order_id: None,
+            settled,
+            win: None,
+            pnl_usd: None,
+        }
+    }
+
+    #[test]
+    fn is_tracked_only_counts_unsettled() {
+        let mut s = EngineState::new(250.0);
+        assert!(!s.is_tracked("T-X"));
+        s.high.open.push(open_pos("T-X", false));
+        assert!(s.is_tracked("T-X")); // tracked in high
+        s.low.open.push(open_pos("T-Y", true));
+        assert!(!s.is_tracked("T-Y")); // settled -> not tracked
+    }
+
+    #[test]
+    fn pending_journal_roundtrips_through_disk() {
+        let mut s = EngineState::new(250.0);
+        s.pending = Some(open_pos("T-P", false));
+        let path = std::env::temp_dir().join("wa_state_pending_test.json");
+        s.save(&path).unwrap();
+        let loaded = EngineState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.pending.unwrap().ticker, "T-P");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

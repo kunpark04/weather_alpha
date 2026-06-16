@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 use wa_book::OrderBook;
 use wa_exec::Mode;
-use wa_kalshi::{KalshiClient, Signer};
+use wa_kalshi::{KalshiClient, PositionHeld, Signer};
 use wa_schedule::{Anchor, City, Market};
 use wa_state::{EngineState, OpenPosition};
 
@@ -133,6 +133,123 @@ fn sync_live_bankroll(cfg: &Config, mode: Mode, client: &KalshiClient, state: &m
     }
 }
 
+/// G4 — adopt any exchange YES-position the Book isn't tracking: an orphan from a crash between place
+/// and save (G3), or a fill the confirm-poll missed because `/portfolio/positions` lagged. The
+/// exchange is truth, so we self-heal by adopting (reconstructing the open position so it settles)
+/// rather than halting. Also clears the pending-order journal. Live-only; a positions-read failure is
+/// a no-op (retried next cycle).
+fn reconcile_live(cfg: &Config, mode: Mode, client: &KalshiClient, state: &mut EngineState) {
+    if mode != Mode::Live {
+        return;
+    }
+    let positions = match client.positions() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("reconcile: positions read failed (skipping): {e}");
+            return;
+        }
+    };
+    let pending = state.pending.clone();
+    let now = now_iso();
+    let mut adoptions: Vec<OpenPosition> = Vec::new();
+    for p in positions.iter().filter(|p| p.side == "yes" && p.contracts > 0) {
+        if state.is_tracked(&p.ticker) {
+            continue;
+        }
+        match open_position_from_exchange(p, &pending, &now) {
+            Some(pos) => adoptions.push(pos),
+            None => tracing::warn!(ticker = %p.ticker, "reconcile: untracked exchange position with unrecognized ticker — manual review"),
+        }
+    }
+    for pos in adoptions {
+        let market = pos.market.clone();
+        tracing::warn!(market = %market, ticker = %pos.ticker, contracts = pos.fillable_contracts, vwap = ?pos.fill_vwap, "RECON: adopted orphan exchange position");
+        log_event(&cfg.log_path, pos_row(&pos, "RECON"));
+        state.book(&market).open.push(pos);
+    }
+    state.pending = None;
+}
+
+/// Reconstruct an `OpenPosition` for an untracked exchange holding. When the pending journal's ticker
+/// matches, reuse its rich metadata (city/series/event/anchor) and overwrite the fill with exchange
+/// truth; otherwise parse the ticker. Returns None if the ticker maps to no known market.
+fn open_position_from_exchange(
+    p: &PositionHeld,
+    pending: &Option<OpenPosition>,
+    now_iso: &str,
+) -> Option<OpenPosition> {
+    let fill = p.avg_price_cents as f64 / 100.0;
+    if let Some(pend) = pending.as_ref().filter(|pd| pd.ticker == p.ticker) {
+        let mut pos = pend.clone();
+        pos.fillable_contracts = p.contracts as f64; // exchange truth
+        pos.fill_vwap = Some(fill);
+        pos.settled = false;
+        pos.win = None;
+        pos.pnl_usd = None;
+        return Some(pos);
+    }
+    let (series, market, event_ticker, event_date) = parse_ticker(&p.ticker)?;
+    Some(OpenPosition {
+        captured_utc: now_iso.to_string(),
+        market,
+        city: String::new(),
+        series,
+        event_ticker,
+        ticker: p.ticker.clone(),
+        subtitle: String::new(),
+        event_date,
+        anchor_utc: String::new(),
+        mid: fill,
+        yes_ask: fill,
+        stake_usd: p.contracts as f64 * fill,
+        intended_contracts: p.contracts as f64,
+        fillable_contracts: p.contracts as f64,
+        fill_vwap: Some(fill),
+        fillable_pct: 1.0,
+        ladder_depth_usd: 0.0,
+        mode: "live".to_string(),
+        order_id: None,
+        settled: false,
+        win: None,
+        pnl_usd: None,
+    })
+}
+
+/// `KXHIGHCHI-26JUN16-T80` -> (series, market, event_ticker, event_date). Market from the series
+/// prefix (`KXHIGH*` -> high, `KXLOWT*` -> low). None if neither prefix matches or the shape is off.
+fn parse_ticker(ticker: &str) -> Option<(String, String, String, String)> {
+    let parts: Vec<&str> = ticker.splitn(3, '-').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let series = parts[0].to_string();
+    let market = if series.starts_with("KXHIGH") {
+        "high"
+    } else if series.starts_with("KXLOWT") {
+        "low"
+    } else {
+        return None;
+    }
+    .to_string();
+    let event_ticker = format!("{}-{}", parts[0], parts[1]);
+    let event_date = parse_event_date(parts[1]).unwrap_or_else(|| parts[1].to_string());
+    Some((series, market, event_ticker, event_date))
+}
+
+/// Kalshi event date-code `26JUN16` -> `2026-06-16` (inverse of `event_date_code`). None on a bad code.
+fn parse_event_date(code: &str) -> Option<String> {
+    if code.len() != 7 {
+        return None;
+    }
+    const MON: [&str; 12] =
+        ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+    let yy: u32 = code.get(0..2)?.parse().ok()?;
+    let mon = code.get(2..5)?;
+    let mm = MON.iter().position(|&m| m == mon)? as u32 + 1;
+    let dd: u32 = code.get(5..7)?.parse().ok()?;
+    Some(format!("20{:02}-{:02}-{:02}", yy, mm, dd))
+}
+
 /// Resident scheduler loop: process the soonest due anchor inside its window, sleep otherwise.
 fn run_resident(
     cfg: &Config,
@@ -144,6 +261,7 @@ fn run_resident(
     let window = ChronoDuration::minutes(cfg.anchor_window_min);
     loop {
         let now = Utc::now();
+        reconcile_live(cfg, mode, client, state);
         settle_open(cfg, client, state);
         sync_live_bankroll(cfg, mode, client, state);
         state.save(&cfg.state_path)?;
@@ -183,6 +301,7 @@ fn eval_once(
     markets: &[Market],
 ) {
     let now = Utc::now();
+    reconcile_live(cfg, mode, client, state);
     settle_open(cfg, client, state);
     for (i, city) in cities.iter().enumerate() {
         let local_date = now.with_timezone(&city.tz).date_naive();
@@ -287,24 +406,9 @@ fn process_anchor(
                 return;
             }
             let coid = format!("wa-{}-{}", entry.ticker, date);
-            let (order_id, contracts, fill_vwap) = match wa_exec::execute(mode, client, &entry, &coid) {
-                Ok(wa_exec::Execution::Filled { order_id, contracts, fill_vwap }) => {
-                    (order_id, contracts, fill_vwap)
-                }
-                Ok(wa_exec::Execution::NoFill) => {
-                    // Live order didn't cross (or nothing fillable) — book no position, don't burn the
-                    // daily cap on a no-trade. Paper/dry-run never return NoFill.
-                    tracing::warn!(market, city = %a.city_name, ticker = %entry.ticker, "NO FILL — no position recorded");
-                    log_event(&cfg.log_path, skip_row(a, &event_ticker, "no_fill", Some(entry.mid), quotes.len()));
-                    return;
-                }
-                Err(e) => {
-                    tracing::error!("execute failed for {}: {e}", entry.ticker);
-                    log_event(&cfg.log_path, skip_row(a, &event_ticker, "order_error", Some(entry.mid), quotes.len()));
-                    return;
-                }
-            };
-            let pos = OpenPosition {
+            // Build the position we intend to open (fill fields are predicted for now; the realized
+            // fill overwrites them below for live).
+            let mut pos = OpenPosition {
                 captured_utc: now_iso(),
                 market: market.to_string(),
                 city: a.city_name.clone(),
@@ -318,21 +422,55 @@ fn process_anchor(
                 yes_ask: entry.yes_ask,
                 stake_usd: entry.stake_usd,
                 intended_contracts: entry.want_contracts,
-                fillable_contracts: contracts, // realized fill (live) / predicted achievable (paper)
-                fill_vwap,                     // realized VWAP (live) / predicted (paper)
+                fillable_contracts: entry.feasibility.fillable_contracts, // predicted; realized below
+                fill_vwap: entry.feasibility.fill_vwap,                   // predicted; realized below
                 fillable_pct: entry.feasibility.fillable_pct, // depth context at decision time
                 ladder_depth_usd: entry.feasibility.ladder_depth_usd,
                 mode: mode.as_str().to_string(),
-                order_id,
+                order_id: None,
                 settled: false,
                 win: None,
                 pnl_usd: None,
             };
+            // G3: write-ahead journal the intent BEFORE sending a live order, so a crash between the
+            // place and the post-place save is recoverable (G4 adopts it with the true fill). If the
+            // journal can't be persisted, don't place — never trade an unrecoverable order.
+            if mode == Mode::Live {
+                state.pending = Some(pos.clone());
+                if let Err(e) = state.save(&cfg.state_path) {
+                    tracing::error!(ticker = %entry.ticker, "journal write failed — NOT placing live order: {e}");
+                    state.pending = None;
+                    return;
+                }
+            }
+            let (order_id, contracts, fill_vwap) = match wa_exec::execute(mode, client, &entry, &coid) {
+                Ok(wa_exec::Execution::Filled { order_id, contracts, fill_vwap }) => {
+                    (order_id, contracts, fill_vwap)
+                }
+                Ok(wa_exec::Execution::NoFill) => {
+                    // Live order didn't cross (or nothing fillable) — book no position, don't burn the
+                    // daily cap on a no-trade. Paper/dry-run never return NoFill.
+                    state.pending = None;
+                    tracing::warn!(market, city = %a.city_name, ticker = %entry.ticker, "NO FILL — no position recorded");
+                    log_event(&cfg.log_path, skip_row(a, &event_ticker, "no_fill", Some(entry.mid), quotes.len()));
+                    return;
+                }
+                Err(e) => {
+                    state.pending = None;
+                    tracing::error!("execute failed for {}: {e}", entry.ticker);
+                    log_event(&cfg.log_path, skip_row(a, &event_ticker, "order_error", Some(entry.mid), quotes.len()));
+                    return;
+                }
+            };
+            pos.order_id = order_id;
+            pos.fillable_contracts = contracts; // realized fill (live) / predicted achievable (paper)
+            pos.fill_vwap = fill_vwap;
             {
                 let book = state.book(market);
                 book.record_entry(date);
                 book.open.push(pos.clone());
             }
+            state.pending = None; // intent fulfilled and recorded; clear the journal
             tracing::info!(
                 market,
                 city = %a.city_name,
@@ -449,5 +587,74 @@ fn log_event(path: &PathBuf, row: serde_json::Value) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         use std::io::Write;
         let _ = writeln!(f, "{row}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn held(ticker: &str, contracts: i64, cents: i64) -> PositionHeld {
+        PositionHeld { ticker: ticker.into(), side: "yes".into(), contracts, avg_price_cents: cents }
+    }
+
+    fn pending_pos(ticker: &str) -> OpenPosition {
+        OpenPosition {
+            captured_utc: "t".into(),
+            market: "high".into(),
+            city: "Chicago".into(),
+            series: "KXHIGHCHI".into(),
+            event_ticker: "KXHIGHCHI-26JUN16".into(),
+            ticker: ticker.into(),
+            subtitle: "80 to 81".into(),
+            event_date: "2026-06-16".into(),
+            anchor_utc: "a".into(),
+            mid: 0.94,
+            yes_ask: 0.95,
+            stake_usd: 41.0,
+            intended_contracts: 43.0,
+            fillable_contracts: 43.0, // predicted in the journal; exchange truth must win on adopt
+            fill_vwap: Some(0.95),
+            fillable_pct: 1.0,
+            ladder_depth_usd: 100.0,
+            mode: "live".into(),
+            order_id: Some("wa-x".into()),
+            settled: false,
+            win: None,
+            pnl_usd: None,
+        }
+    }
+
+    #[test]
+    fn parse_ticker_maps_market_and_date() {
+        let (s, m, e, d) = parse_ticker("KXHIGHCHI-26JUN16-T80").unwrap();
+        assert_eq!((s.as_str(), m.as_str(), e.as_str(), d.as_str()), ("KXHIGHCHI", "high", "KXHIGHCHI-26JUN16", "2026-06-16"));
+        assert_eq!(parse_ticker("KXLOWTCHI-26JUN16-T54").unwrap().1, "low");
+        assert!(parse_ticker("FOOBAR-26JUN16-X").is_none()); // unknown series prefix
+        assert!(parse_ticker("KXHIGHCHI").is_none()); // no event segment
+    }
+
+    #[test]
+    fn adopt_orphan_prefers_journal_but_takes_exchange_fill() {
+        let p = held("KXHIGHCHI-26JUN16-T80", 40, 95);
+        let pos = open_position_from_exchange(&p, &Some(pending_pos("KXHIGHCHI-26JUN16-T80")), "now").unwrap();
+        assert_eq!(pos.city, "Chicago"); // metadata enriched from the journal
+        assert_eq!(pos.fillable_contracts, 40.0); // ...but the FILL is exchange truth (not journal's 43)
+        assert_eq!(pos.fill_vwap, Some(0.95));
+        assert!(!pos.settled);
+        // a journal for a DIFFERENT ticker is ignored -> reconstruct from the exchange ticker
+        let other = open_position_from_exchange(&p, &Some(pending_pos("OTHER-TICKER")), "now").unwrap();
+        assert!(other.city.is_empty());
+        assert_eq!(other.market, "high");
+    }
+
+    #[test]
+    fn adopt_orphan_reconstructs_from_ticker_without_journal() {
+        let pos = open_position_from_exchange(&held("KXLOWTCHI-26JUN16-T54", 10, 90), &None, "now").unwrap();
+        assert_eq!(pos.market, "low");
+        assert_eq!(pos.event_ticker, "KXLOWTCHI-26JUN16");
+        assert_eq!(pos.fillable_contracts, 10.0);
+        assert_eq!(pos.fill_vwap, Some(0.90));
+        assert!(pos.city.is_empty()); // sparse metadata without a journal
     }
 }

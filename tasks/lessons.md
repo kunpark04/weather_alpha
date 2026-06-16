@@ -5,6 +5,54 @@ prevents recurrence. Most recent first.
 
 ---
 
+## L25 — Complete the enumerated fix-set; don't end turns asking the user which clearly-warranted fix to do
+
+**Context.** Hardening the Rust LIVE engine pre-arming, I kept closing each batch with a "do X next, or
+Y?" question — most pointedly offering "merge to main, **or** knock out the resting-order residual" while
+the engine still had documented residuals **and** confirmed adversarial-review findings open. The user:
+*"Knock out any errors. Why are you asking me this. ALL ERRORS should be fixed."* They'd already said
+"DO THEM ALL" a turn earlier. The residuals + findings were a finite, enumerated set of genuine
+improvements I had **already scoped** — asking which to do treated clear fixes as optional.
+
+**Rule.** When an audit / review / your own analysis surfaces a **finite, enumerated set** of genuine
+defects or documented residuals, **fix the whole set, then report** — don't end turns asking the user to
+prioritize among fixes they obviously want. Reserve questions for true **forks the user owns** (release /
+merge-to-`main`, a product tradeoff, a genuinely ambiguous spec), never "fix the known bug, or do
+something else?". A documented residual is a TODO **you own**, not a menu item. This is CLAUDE.md §6
+(autonomous bug fixing — "just fix it, no hand-holding") applied to multi-item cleanup: enumerate, then
+clear the list. The merge-to-`main` question was legitimately the user's; "which residual to fix" was not.
+
+**Why it matters.** Repeatedly asking "which subset?" stalls obvious work, pushes triage burden back onto
+the user, and reads as reluctance to finish — the user had to say it three times before I stopped.
+Finishing the scoped set and surfacing the one real decision (merge) is the higher-trust delivery.
+
+---
+
+## L24 — A "0 = disable" sentinel must guard the knob that disables the FEATURE; validate config invariants at load so one plausible misconfig can't silently brick a money path
+
+**Context.** The G11 canary has two knobs — `canary_trades` (count; annotated "0 = off") and
+`canary_max_contracts` (size per canary order, default 1). An adversarial review caught that
+`canary_max_contracts <= 0` makes every live order fill 0 contracts → `live_fills` never advances → the
+canary never exits → the live path is **permanently deadlocked** (silent: operator sees "no trades", no
+error). Worse, `wa.toml`'s "(0=off)" annotation sits on `canary_trades` directly above
+`canary_max_contracts = 1`, inviting an operator to zero the **wrong** knob to "disable" the canary.
+Fixed: `Config::load` now rejects `canary_max_contracts < 1` (fail-fast, message names the right disable
+knob) + a test. Tests don't exercise a 0-cap, so the suite was green — the review found it.
+
+**Rule.** A feature's "disable" sentinel must live on the knob that disables the **feature**; a
+sizing/quantity **sibling** must be validated against its safe floor (`>= 1`) **at config load**, failing
+fast with a message that points at the correct disable knob. Never let a single plausible config edit
+silently deadlock a live/money path — assert invariants at startup, don't discover them at the first live
+anchor. And **run adversarial review on money-path code**: this CRITICAL was invisible to a green test
+suite. Sibling of [[L4]] (a config knob is an input, not a guarantee — here a knob that needs a guard
+against its own brick value).
+
+**Why it matters.** A config-induced permanent no-op on an armed money bot is a silent outage with no
+error to chase; the misleading "(0=off)" annotation made the trap likely, not hypothetical. Cents to
+prevent at load, hours to diagnose live.
+
+---
+
 ## L23 — Re-implementing an existing data path: copy the known-good reader's EXACT field access; a silent all-zero/empty parse is a bug, and green unit tests can encode a stale API shape
 
 **Context.** Checking the directional PAPER bot (2026-06-16), every entered pick logged `fillable_pct=0`,

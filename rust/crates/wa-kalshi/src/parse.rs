@@ -4,14 +4,17 @@
 use serde_json::Value;
 use wa_book::{Level, OrderBook, Quote};
 
+/// Coerce a single JSON scalar that may be a number OR a numeric string (e.g. "0.0100") to f64.
+/// None if it is neither. Shared by `fp` (keyed lookup) and the orderbook ladder parser, both of
+/// which face Kalshi's mix of numeric and stringified fixed-point fields.
+fn as_num(x: &Value) -> Option<f64> {
+    x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse::<f64>().ok()))
+}
+
 /// Parse a Kalshi fixed-point field (a JSON number, or a string like "0.94") to f64. None if absent
 /// or unparseable. Mirrors `kalshi._fp` semantics (but returns Option so callers see "missing").
 pub fn fp(v: &Value, key: &str) -> Option<f64> {
-    let x = v.get(key)?;
-    if let Some(f) = x.as_f64() {
-        return Some(f);
-    }
-    x.as_str().and_then(|s| s.parse::<f64>().ok())
+    as_num(v.get(key)?)
 }
 
 fn str_field<'a>(m: &'a Value, key: &str) -> Option<&'a str> {
@@ -38,29 +41,43 @@ pub fn quotes_from_markets(markets: &[Value]) -> Vec<Quote> {
         .collect()
 }
 
-/// Parse a `/markets/{ticker}/orderbook` response into a `wa_book::OrderBook`. Kalshi returns
-/// `{"orderbook": {"yes": [[price_cents, size], ...], "no": [[...]]}}` with **integer-cent** prices;
-/// convert to dollars so the `wa_book` ladder/feasibility code works in `[0,1]` like the Python.
+/// Parse a `/markets/{ticker}/orderbook` response into a `wa_book::OrderBook`. The live Kalshi public
+/// endpoint serves the book under **`"orderbook_fp"`** with **already-dollar** `"yes_dollars"`/
+/// `"no_dollars"` ladders whose prices *and* sizes are JSON strings (e.g. `["0.0100","2952.00"]` =
+/// $0.01 × 2952). The legacy shape was **`"orderbook"`** with `"yes"`/`"no"` **integer-cent** ladders.
+/// Read `orderbook_fp` as-is (no scaling) and fall back to the legacy cents shape (÷100) so both work
+/// and the `wa_book` ladder/feasibility code always sees dollars in `[0,1]`. Mirrors
+/// `directional_paper.fetch_orderbook` / `orderbook_logger.build_record`.
 pub fn orderbook_from_value(ob: &Value) -> OrderBook {
-    let inner = ob.get("orderbook").unwrap_or(ob);
-    let side = |s: &Value| -> Vec<Level> {
+    // [[price, size], ...] -> Vec<Level>, multiplying the price by `scale` (1.0 for dollar ladders,
+    // 0.01 for legacy cents). Both fields may be numbers or numeric strings, so coerce via `as_num`.
+    let side = |s: &Value, scale: f64| -> Vec<Level> {
         s.as_array()
             .map(|levels| {
                 levels
                     .iter()
                     .filter_map(|lvl| {
                         let arr = lvl.as_array()?;
-                        let price_cents = arr.first()?.as_f64()?;
-                        let size = arr.get(1)?.as_f64()?;
-                        Some(Level { price: price_cents / 100.0, size })
+                        let price = as_num(arr.first()?)?;
+                        let size = as_num(arr.get(1)?)?;
+                        Some(Level { price: price * scale, size })
                     })
                     .collect()
             })
             .unwrap_or_default()
     };
+    // Current API: dollar-denominated `orderbook_fp` (no scaling).
+    if let Some(fpb) = ob.get("orderbook_fp") {
+        return OrderBook {
+            yes: fpb.get("yes_dollars").map(|s| side(s, 1.0)).unwrap_or_default(),
+            no: fpb.get("no_dollars").map(|s| side(s, 1.0)).unwrap_or_default(),
+        };
+    }
+    // Legacy fallback: integer-cent `orderbook` (or a bare `{yes,no}` object) -> dollars.
+    let inner = ob.get("orderbook").unwrap_or(ob);
     OrderBook {
-        yes: inner.get("yes").map(side).unwrap_or_default(),
-        no: inner.get("no").map(side).unwrap_or_default(),
+        yes: inner.get("yes").map(|s| side(s, 0.01)).unwrap_or_default(),
+        no: inner.get("no").map(|s| side(s, 0.01)).unwrap_or_default(),
     }
 }
 
@@ -111,13 +128,34 @@ mod tests {
     }
 
     #[test]
-    fn orderbook_converts_cents_to_dollars() {
+    fn orderbook_reads_orderbook_fp_dollar_strings() {
+        // The live public endpoint serves the book under `orderbook_fp` with already-dollar
+        // `*_dollars` ladders whose price AND size are strings (e.g. ["0.0100","2952.00"]). They
+        // must be read as-is — NO cents conversion — or armed sizing runs against an empty book.
+        let ob = json!({"orderbook_fp":{
+            "yes_dollars":[["0.4000","100.00"]],
+            "no_dollars":[["0.0600","50.00"],["0.0300","100.00"]],
+        }});
+        let book = orderbook_from_value(&ob);
+        assert_eq!(book.yes.len(), 1);
+        assert_eq!(book.no.len(), 2);
+        assert!((book.yes[0].price - 0.40).abs() < 1e-12); // "0.4000" stays $0.40 (no /100)
+        assert!((book.no[0].price - 0.06).abs() < 1e-12); // "0.0600" stays $0.06
+        assert!((book.no[0].size - 50.0).abs() < 1e-12); // "50.00" -> 50 contracts
+        // the wa_book ladder flips the no-book to ascending yes-asks 0.94 / 0.97
+        let ladder = wa_book::yes_ask_ladder(&book);
+        assert!((ladder[0].0 - 0.94).abs() < 1e-9);
+        assert!((ladder[1].0 - 0.97).abs() < 1e-9);
+    }
+
+    #[test]
+    fn orderbook_legacy_cents_fallback() {
+        // Older shape: `orderbook` with integer-cent ladders -> scaled cents->dollars.
         let ob = json!({"orderbook":{"yes":[[40,100]],"no":[[6,50],[3,100]]}});
         let book = orderbook_from_value(&ob);
         assert_eq!(book.no.len(), 2);
         assert!((book.no[0].price - 0.06).abs() < 1e-12); // 6¢ -> $0.06
         assert!((book.no[0].size - 50.0).abs() < 1e-12);
-        // the wa_book ladder flips these to yes-asks 0.94 / 0.97
         let ladder = wa_book::yes_ask_ladder(&book);
         assert!((ladder[0].0 - 0.94).abs() < 1e-9);
     }

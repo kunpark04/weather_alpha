@@ -38,6 +38,12 @@ first-come as anchors fire east→west, **no cross-city look-ahead**; 16.67% slo
 `directional-paper-{high,low}` are retired. The **LIVE engine is a separate Rust daemon**
 ([`rust/`](rust/README.md), Option-A per-anchor, real-order-capable) that mirrors the same executable
 rule and **ships built but unarmed**. The orderbook logger remains the only always-on writer.
+**⚠️ As of 2026-06-25 the entire weather-alpha data pipeline is DISABLED (owner-directed):** the
+orderbook logger + all 11 `weather-alpha-paper-cap@*` timers were `systemctl --user disable --now` on
+the droplet (now `inactive`, won't auto-start), and the four local pull/refresh Scheduled Tasks
+(`PullOrderbookZips`, `PullBotState`, `PullDirectionalPaper`, `RefreshTruthTape`) were unregistered.
+No weather-alpha service writes or pulls data now; nothing is armed. Re-enable per
+[`deploy/README.md`](deploy/README.md).
 A deep-history study (`/historical/*`, 3.4 yr × 20 cities) found **only Chicago has a
 durable edge** and **maker execution doesn't help** (adverse selection). See
 [`HANDOFF.md`](HANDOFF.md) §1.5, §1.6, §7 (`DEPLOY`/`L2`).
